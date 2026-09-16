@@ -53,6 +53,11 @@ class ManagerWindow(Adw.ApplicationWindow):
         launch_button.connect("clicked", self._launch)
         header.pack_end(launch_button)
 
+        conversations_button = Gtk.Button(label="AI 对话")
+        conversations_button.set_tooltip_text("管理 Claude Code 和 Codex 对话记录")
+        conversations_button.connect("clicked", self._open_conversations)
+        header.pack_end(conversations_button)
+
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         toolbar.set_content(scroller)
@@ -371,6 +376,19 @@ class ManagerWindow(Adw.ApplicationWindow):
             self._toast("已打开私有 Home")
         except GLib.Error as exc:
             self._toast(f"无法打开目录：{exc.message}")
+
+    def _open_conversations(self, _button: Gtk.Button) -> None:
+        from .conversation_ui import ConversationWindow
+
+        window = getattr(self, "_conversation_window", None)
+        if window is None:
+            window = ConversationWindow(self, str(self.profile["id"]))
+            self._conversation_window = window
+            window.connect(
+                "destroy",
+                lambda _window: setattr(self, "_conversation_window", None),
+            )
+        window.present()
 
     def _launch(self, _button: Gtk.Button) -> None:
         try:

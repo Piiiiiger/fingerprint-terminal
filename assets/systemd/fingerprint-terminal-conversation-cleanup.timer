@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Fingerprint Terminal conversation trash cleanup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

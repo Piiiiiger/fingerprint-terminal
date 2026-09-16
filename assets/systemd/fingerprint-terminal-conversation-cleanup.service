@@ -1,0 +1,6 @@
+[Unit]
+Description=Fingerprint Terminal conversation trash cleanup
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/fingerprint-terminal conversations cleanup

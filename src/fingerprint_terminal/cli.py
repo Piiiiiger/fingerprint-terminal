@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import __version__
+from .conversations import ConversationError, ConversationManager
 from .identity import IdentityError, detect_exit_identity
 from .network import NetworkError, TRANSPARENT_DEPENDENCIES, isolation_command, is_transparent, prepare_transparent_environment
 from .sandbox import SandboxError, is_strict, strict_command
@@ -70,6 +71,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("config", help="print the active profile config path")
     sub.add_parser("doctor", help="check native terminal/profile prerequisites")
     sub.add_parser("manager", help="open the GTK profile manager")
+
+    conversations = sub.add_parser(
+        "conversations", help="manage Claude Code and Codex local conversations"
+    )
+    conversations_sub = conversations.add_subparsers(
+        dest="conversation_command", required=True
+    )
+    conversations_sub.add_parser(
+        "cleanup", help="permanently delete conversation trash older than 14 days"
+    )
+    conversations_sub.add_parser(
+        "status", help="show conversation and trash counts without message bodies"
+    )
     return parser
 
 
@@ -107,6 +121,13 @@ def launch_command(profile_id: str) -> tuple[list[str], dict[str, str]]:
 
 
 def cmd_launch(profile_id: str, *, dry_run: bool) -> int:
+    if profile_id == "strict-auto-ip":
+        # Opportunistic retention enforcement in addition to the daily timer.
+        # Never block terminal startup if stale trash cleanup itself fails.
+        try:
+            ConversationManager(profile_id).cleanup_expired()
+        except Exception:
+            pass
     command, env = launch_command(profile_id)
     if dry_run:
         print(printable_command(command))
@@ -202,6 +223,25 @@ def cmd_manager() -> int:
     return manager_main([])
 
 
+def cmd_conversations(command: str) -> int:
+    manager = ConversationManager("strict-auto-ip")
+    if command == "cleanup":
+        removed = manager.cleanup_expired()
+        print(f"conversation trash cleanup: removed={removed}")
+        return 0
+    if command == "status":
+        active = manager.discover()
+        trash = manager.trash_entries()
+        claude = sum(1 for item in active if item.provider == "claude")
+        codex = sum(1 for item in active if item.provider == "codex")
+        print(
+            f"active={len(active)} claude={claude} codex={codex} "
+            f"trash={len(trash)} retention_days=14"
+        )
+        return 0
+    return 2
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -224,7 +264,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_doctor()
         if args.subcommand == "manager":
             return cmd_manager()
-    except (ProfileError, NetworkError, IdentityError, SandboxError) as exc:
+        if args.subcommand == "conversations":
+            return cmd_conversations(args.conversation_command)
+    except (ProfileError, NetworkError, IdentityError, SandboxError, ConversationError) as exc:
         print(f"fingerprint-terminal: {exc}", file=sys.stderr)
         return 2
     return 2

@@ -23,6 +23,19 @@ ChatGPT fingerprint desktop: a private application network namespace, veth,
 environment variables, and startup fails if the transparent namespace does
 not reproduce the IP/country observed during preflight.
 
+## AI conversation manager
+
+Fingerprint Terminal can manage local Claude Code and Codex conversation histories from the Settings window. Click **AI 对话** to open the visual manager. It supports custom categories, per-conversation categorization, provider/search filters, one-click category cleanup, restore, and permanent deletion.
+
+Moving a conversation to the Fingerprint Terminal trash removes the provider's resumable conversation artifact and its related local indexes. Claude Code project history/sidecars and Codex session indexes/thread rows are handled separately; authentication, settings, plugins, and Codex memories are not modified. Trashed conversations therefore stop appearing to the corresponding CLI while remaining recoverable for 14 days.
+
+Trash is permanently purged after 14 days by a daily user-systemd timer when available. Expiration is also enforced when `strict-auto-ip` is launched and whenever the conversation manager is opened. Maintenance commands:
+
+```bash
+fingerprint-terminal conversations status
+fingerprint-terminal conversations cleanup
+```
+
 ## Quick start
 
 ```bash
