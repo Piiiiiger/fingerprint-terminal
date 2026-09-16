@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import calendar
 import math
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import gi
@@ -56,6 +57,9 @@ class ConversationWindow(Adw.Window):
         self.manager.cleanup_expired()
         self.selected_provider = "claude"
         self.selected_category = "全部"
+        self.start_date_value: date | None = None
+        self.end_date_value: date | None = None
+        self._date_popover: Gtk.Popover | None = None
         self.category_rows: dict[Gtk.ListBoxRow, str] = {}
         self.active_rows: list[Gtk.Widget] = []
         self.trash_rows: list[Gtk.Widget] = []
@@ -208,34 +212,27 @@ class ConversationWindow(Adw.Window):
         date_label.add_css_class("dim-label")
         date_controls.append(date_label)
 
-        self.start_date = Gtk.Entry()
-        self.start_date.set_placeholder_text("开始 YYYY-MM-DD")
-        self.start_date.set_max_length(10)
-        self.start_date.set_width_chars(13)
-        self.start_date.connect("changed", lambda _entry: self._refresh_active_rows())
-        date_controls.append(self.start_date)
+        self.start_date_button = Gtk.Button(label="开始日期")
+        self.start_date_button.add_css_class("pill")
+        self.start_date_button.set_tooltip_text("选择开始日期")
+        self.start_date_button.connect("clicked", self._open_date_picker, "start")
+        date_controls.append(self.start_date_button)
 
         dash = Gtk.Label(label="—")
         dash.add_css_class("dim-label")
         date_controls.append(dash)
 
-        self.end_date = Gtk.Entry()
-        self.end_date.set_placeholder_text("结束 YYYY-MM-DD")
-        self.end_date.set_max_length(10)
-        self.end_date.set_width_chars(13)
-        self.end_date.connect("changed", lambda _entry: self._refresh_active_rows())
-        date_controls.append(self.end_date)
+        self.end_date_button = Gtk.Button(label="结束日期")
+        self.end_date_button.add_css_class("pill")
+        self.end_date_button.set_tooltip_text("选择结束日期")
+        self.end_date_button.connect("clicked", self._open_date_picker, "end")
+        date_controls.append(self.end_date_button)
 
         clear_dates = Gtk.Button(label="清除日期")
         clear_dates.add_css_class("flat")
         clear_dates.connect("clicked", self._clear_date_filter)
         date_controls.append(clear_dates)
         right.append(date_controls)
-
-        self.date_error = Gtk.Label(xalign=0)
-        self.date_error.add_css_class("error")
-        self.date_error.set_visible(False)
-        right.append(self.date_error)
 
         category_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         category_header.set_margin_top(2)
@@ -394,31 +391,206 @@ class ConversationWindow(Adw.Window):
             self.active_group.remove(row)
         self.active_rows.clear()
 
-    def _clear_date_filter(self, _button: Gtk.Button) -> None:
-        self.start_date.set_text("")
-        self.end_date.set_text("")
+    def _available_date_counts(self) -> dict[date, int]:
+        counts: dict[date, int] = {}
+        if not hasattr(self, "conversations"):
+            return counts
+        for conversation in self.conversations:
+            if conversation.provider != self.selected_provider:
+                continue
+            if self.selected_category != "全部" and conversation.category != self.selected_category:
+                continue
+            if conversation.updated_at <= 0:
+                continue
+            day = datetime.fromtimestamp(conversation.updated_at).date()
+            counts[day] = counts.get(day, 0) + 1
+        return counts
 
-    def _date_bounds(self) -> tuple[float | None, float | None] | None:
-        try:
-            start = _date_bound(self.start_date.get_text())
-            end = _date_bound(self.end_date.get_text(), end=True)
-        except ValueError:
-            self.date_error.set_label("日期格式应为 YYYY-MM-DD，例如 2026-09-16")
-            self.date_error.set_visible(True)
-            return None
-        if start is not None and end is not None and start >= end:
-            self.date_error.set_label("开始日期不能晚于结束日期")
-            self.date_error.set_visible(True)
-            return None
-        self.date_error.set_visible(False)
-        return start, end
+    def _sync_date_controls(self) -> None:
+        available = set(self._available_date_counts())
+        if self.start_date_value is not None and self.start_date_value not in available:
+            self.start_date_value = None
+        if self.end_date_value is not None and self.end_date_value not in available:
+            self.end_date_value = None
+        if (
+            self.start_date_value is not None
+            and self.end_date_value is not None
+            and self.start_date_value > self.end_date_value
+        ):
+            self.end_date_value = None
+
+        enabled = bool(available)
+        self.start_date_button.set_sensitive(enabled)
+        self.end_date_button.set_sensitive(enabled)
+        self.start_date_button.set_label(
+            self.start_date_value.isoformat() if self.start_date_value else "开始日期"
+        )
+        self.end_date_button.set_label(
+            self.end_date_value.isoformat() if self.end_date_value else "结束日期"
+        )
+
+    def _close_date_popover(self) -> None:
+        popover = self._date_popover
+        self._date_popover = None
+        if popover is None:
+            return
+        popover.popdown()
+        if popover.get_parent() is not None:
+            popover.unparent()
+
+    def _open_date_picker(self, button: Gtk.Button, target: str) -> None:
+        counts = self._available_date_counts()
+        if not counts:
+            self._toast("当前分类没有可选的聊天日期")
+            return
+
+        self._close_date_popover()
+        popover = Gtk.Popover()
+        popover.set_autohide(True)
+        popover.set_has_arrow(True)
+        popover.set_position(Gtk.PositionType.BOTTOM)
+        popover.set_parent(button)
+        self._date_popover = popover
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        body.set_margin_top(12)
+        body.set_margin_bottom(12)
+        body.set_margin_start(12)
+        body.set_margin_end(12)
+        popover.set_child(body)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        previous = Gtk.Button(icon_name="go-previous-symbolic")
+        previous.add_css_class("flat")
+        month_label = Gtk.Label()
+        month_label.set_hexpand(True)
+        month_label.add_css_class("heading")
+        month_label.set_xalign(0.5)
+        following = Gtk.Button(icon_name="go-next-symbolic")
+        following.add_css_class("flat")
+        header.append(previous)
+        header.append(month_label)
+        header.append(following)
+        body.append(header)
+
+        grid = Gtk.Grid(column_spacing=4, row_spacing=4)
+        body.append(grid)
+
+        hint = Gtk.Label(label="带圆点的日期有聊天记录；灰色日期不可选", xalign=0)
+        hint.add_css_class("dim-label")
+        hint.add_css_class("caption")
+        body.append(hint)
+
+        months = sorted({(day.year, day.month) for day in counts})
+        selected = self.start_date_value if target == "start" else self.end_date_value
+        if selected is None:
+            selected = self.end_date_value if target == "start" else self.start_date_value
+        current_month = (selected.year, selected.month) if selected else months[-1]
+        if current_month not in months:
+            current_month = months[-1]
+        state = {"month": current_month}
+
+        weekday_names = ("一", "二", "三", "四", "五", "六", "日")
+
+        def clear_grid() -> None:
+            child = grid.get_first_child()
+            while child is not None:
+                next_child = child.get_next_sibling()
+                grid.remove(child)
+                child = next_child
+
+        def choose_day(_button: Gtk.Button, chosen: date) -> None:
+            if target == "start":
+                self.start_date_value = chosen
+                if self.end_date_value is not None and chosen > self.end_date_value:
+                    self.end_date_value = None
+            else:
+                self.end_date_value = chosen
+                if self.start_date_value is not None and chosen < self.start_date_value:
+                    self.start_date_value = None
+            self._sync_date_controls()
+            self._close_date_popover()
+            self._refresh_active_rows()
+
+        def render_month() -> None:
+            clear_grid()
+            year, month = state["month"]
+            month_label.set_label(f"{year}年{month}月")
+
+            month_index = months.index((year, month))
+            previous.set_sensitive(month_index > 0)
+            following.set_sensitive(month_index + 1 < len(months))
+
+            for column, name in enumerate(weekday_names):
+                label = Gtk.Label(label=name)
+                label.add_css_class("dim-label")
+                label.add_css_class("caption")
+                grid.attach(label, column, 0, 1, 1)
+
+            weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(year, month)
+            for row_index, week in enumerate(weeks, start=1):
+                for column, day_number in enumerate(week):
+                    if day_number == 0:
+                        spacer = Gtk.Label(label="")
+                        spacer.set_size_request(42, 44)
+                        grid.attach(spacer, column, row_index, 1, 1)
+                        continue
+
+                    chosen = date(year, month, day_number)
+                    count = counts.get(chosen, 0)
+                    day_button = Gtk.Button()
+                    day_button.set_size_request(42, 44)
+                    day_button.add_css_class("flat")
+                    day_button.set_sensitive(count > 0)
+
+                    day_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+                    day_label = Gtk.Label(label=str(day_number))
+                    day_box.append(day_label)
+                    marker = Gtk.Label(label="•" if count else "")
+                    marker.add_css_class("caption")
+                    if count:
+                        marker.add_css_class("accent")
+                        day_button.add_css_class("accent")
+                        day_button.set_tooltip_text(f"{count} 条聊天记录")
+                        day_button.connect("clicked", choose_day, chosen)
+                    else:
+                        marker.add_css_class("dim-label")
+                    day_box.append(marker)
+                    day_button.set_child(day_box)
+
+                    if chosen in {self.start_date_value, self.end_date_value}:
+                        day_button.remove_css_class("flat")
+                        day_button.add_css_class("suggested-action")
+                    grid.attach(day_button, column, row_index, 1, 1)
+
+        def move_month(_button: Gtk.Button, delta: int) -> None:
+            index = months.index(state["month"])
+            target_index = index + delta
+            if 0 <= target_index < len(months):
+                state["month"] = months[target_index]
+                render_month()
+
+        previous.connect("clicked", move_month, -1)
+        following.connect("clicked", move_month, 1)
+        def on_closed(closed: Gtk.Popover) -> None:
+            if self._date_popover is closed:
+                self._date_popover = None
+            if closed.get_parent() is not None:
+                closed.unparent()
+
+        popover.connect("closed", on_closed)
+        render_month()
+        popover.popup()
+
+    def _clear_date_filter(self, _button: Gtk.Button | None = None) -> None:
+        self.start_date_value = None
+        self.end_date_value = None
+        self._close_date_popover()
+        self._sync_date_controls()
+        self._refresh_active_rows()
 
     def _filtered_conversations(self) -> list[Conversation]:
         query = self.search.get_text().strip().casefold()
-        bounds = self._date_bounds()
-        if bounds is None:
-            return []
-        start, end = bounds
         result: list[Conversation] = []
         for conversation in self.conversations:
             if conversation.provider != self.selected_provider:
@@ -427,9 +599,10 @@ class ConversationWindow(Adw.Window):
                 continue
             if query and query not in conversation.title.casefold():
                 continue
-            if start is not None and conversation.updated_at < start:
+            day = datetime.fromtimestamp(conversation.updated_at).date()
+            if self.start_date_value is not None and day < self.start_date_value:
                 continue
-            if end is not None and conversation.updated_at >= end:
+            if self.end_date_value is not None and day > self.end_date_value:
                 continue
             result.append(conversation)
         return result
@@ -437,6 +610,7 @@ class ConversationWindow(Adw.Window):
     def _refresh_active_rows(self) -> None:
         if not hasattr(self, "conversations"):
             return
+        self._sync_date_controls()
         self._clear_active_group()
         records = self._filtered_conversations()
         self.active_empty.set_visible(not records)
