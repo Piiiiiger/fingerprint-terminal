@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+dist/
+build/
+
+# Local credentials and machine-specific overrides
+.env
+.env.*
+*.pem
+*.key
+config/profiles.local.json

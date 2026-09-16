@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Fingerprint Terminal Settings
+Name[zh_CN]=指纹终端设置
+Comment=Manage Fingerprint Terminal shared folders and profiles
+Comment[zh_CN]=管理指纹终端共享目录和隔离配置
+Exec=fingerprint-terminal manager
+TryExec=fingerprint-terminal
+Icon=preferences-system
+Terminal=false
+Categories=Settings;
+Keywords=fingerprint;terminal;settings;folders;shares;sandbox;
+Keywords[zh_CN]=指纹;终端;设置;目录;共享;隔离;
+StartupNotify=true
+StartupWMClass=io.fingerprintterminal.FingerprintTerminal

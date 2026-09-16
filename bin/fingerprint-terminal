@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+root_dir="$(cd -- "$(dirname -- "$script_path")/.." && pwd)"
+export PYTHONPATH="$root_dir/src${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m fingerprint_terminal.cli "$@"
+

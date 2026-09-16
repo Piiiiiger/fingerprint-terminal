@@ -1,0 +1,25 @@
+[Desktop Entry]
+Type=Application
+Name=Fingerprint Terminal
+Name[zh_CN]=指纹终端
+Comment=Open a real local terminal with a named profile
+Comment[zh_CN]=使用隔离指纹配置启动真实本地终端
+Exec=fingerprint-terminal launch strict-auto-ip
+TryExec=fingerprint-terminal
+Icon=utilities-terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=fingerprint;terminal;proxy;transparent;sandbox;
+Keywords[zh_CN]=指纹;终端;代理;透明代理;隔离;
+StartupNotify=true
+Actions=Manager;Local;
+
+[Desktop Action Manager]
+Name=Profile Manager
+Name[zh_CN]=配置管理器
+Exec=fingerprint-terminal manager
+
+[Desktop Action Local]
+Name=Local Terminal
+Name[zh_CN]=普通本地终端
+Exec=fingerprint-terminal launch local
