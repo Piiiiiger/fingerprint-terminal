@@ -44,6 +44,7 @@ class ConversationWindow(Adw.Window):
         self.set_size_request(760, 560)
         self.manager = ConversationManager(profile_id)
         self.manager.cleanup_expired()
+        self.selected_provider = "claude"
         self.selected_category = "全部"
         self.category_rows: dict[Gtk.ListBoxRow, str] = {}
         self.active_rows: list[Gtk.Widget] = []
@@ -55,17 +56,43 @@ class ConversationWindow(Adw.Window):
         toolbar = Adw.ToolbarView()
         self.toast_overlay.set_child(toolbar)
         header = Adw.HeaderBar()
+        header.set_show_end_title_buttons(False)
         toolbar.add_top_bar(header)
 
         self.stack = Adw.ViewStack()
         switcher = Adw.ViewSwitcher()
         switcher.set_stack(self.stack)
-        header.set_title_widget(switcher)
+
+        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        provider_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        provider_box.add_css_class("linked")
+        self.claude_provider_button = Gtk.ToggleButton(label="Claude Code")
+        self.codex_provider_button = Gtk.ToggleButton(label="Codex")
+        self.codex_provider_button.set_group(self.claude_provider_button)
+        self.claude_provider_button.set_active(True)
+        self.claude_provider_button.connect(
+            "toggled", self._provider_toggled, "claude"
+        )
+        self.codex_provider_button.connect(
+            "toggled", self._provider_toggled, "codex"
+        )
+        provider_box.append(self.claude_provider_button)
+        provider_box.append(self.codex_provider_button)
+        title_box.append(provider_box)
+        separator = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        title_box.append(separator)
+        title_box.append(switcher)
+        header.set_title_widget(title_box)
 
         refresh = Gtk.Button(icon_name="view-refresh-symbolic")
         refresh.set_tooltip_text("刷新")
         refresh.connect("clicked", lambda _button: self.refresh())
         header.pack_end(refresh)
+
+        close_button = Gtk.Button(icon_name="window-close-symbolic")
+        close_button.set_tooltip_text("关闭")
+        close_button.connect("clicked", self._close_window)
+        header.pack_end(close_button)
 
         self.active_page = self._build_active_page()
         self.trash_page = self._build_trash_page()
@@ -80,11 +107,31 @@ class ConversationWindow(Adw.Window):
     def _toast(self, message: str) -> None:
         self.toast_overlay.add_toast(Adw.Toast.new(message))
 
-    def _on_close_request(self, _window: Gtk.Window) -> bool:
+    def _close_window(self, _button: Gtk.Widget | None = None) -> None:
         if self._cleanup_timer:
             GLib.source_remove(self._cleanup_timer)
             self._cleanup_timer = 0
-        return False
+        parent = self.get_transient_for()
+        if parent is not None and getattr(parent, "_conversation_window", None) is self:
+            setattr(parent, "_conversation_window", None)
+        self.set_visible(False)
+        self.set_transient_for(None)
+
+    def _on_close_request(self, _window: Gtk.Window) -> bool:
+        self._close_window()
+        return True
+
+    def _provider_toggled(self, button: Gtk.ToggleButton, provider: str) -> None:
+        if not button.get_active() or provider == self.selected_provider:
+            return
+        self.selected_provider = provider
+        self.selected_category = "全部"
+        if hasattr(self, "conversations"):
+            provider_label = "Claude Code" if provider == "claude" else "Codex"
+            self.categories_title.set_label(f"{provider_label} 分类")
+            self._refresh_categories()
+            self._refresh_active_rows()
+            self._refresh_trash_rows()
 
     def _hourly_cleanup(self) -> bool:
         removed = self.manager.cleanup_expired()
@@ -104,9 +151,9 @@ class ConversationWindow(Adw.Window):
         sidebar.set_margin_end(18)
         root.append(sidebar)
 
-        categories_title = Gtk.Label(label="分类", xalign=0)
-        categories_title.add_css_class("title-3")
-        sidebar.append(categories_title)
+        self.categories_title = Gtk.Label(label="Claude Code 分类", xalign=0)
+        self.categories_title.add_css_class("title-3")
+        sidebar.append(self.categories_title)
 
         self.category_list = Gtk.ListBox()
         self.category_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
@@ -144,13 +191,6 @@ class ConversationWindow(Adw.Window):
         self.search.connect("search-changed", lambda _entry: self._refresh_active_rows())
         controls.append(self.search)
 
-        self.provider_filter = Gtk.ComboBoxText()
-        self.provider_filter.append("all", "全部来源")
-        self.provider_filter.append("claude", "Claude Code")
-        self.provider_filter.append("codex", "Codex")
-        self.provider_filter.set_active_id("all")
-        self.provider_filter.connect("changed", lambda _combo: self._refresh_active_rows())
-        controls.append(self.provider_filter)
         right.append(controls)
 
         category_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -199,16 +239,16 @@ class ConversationWindow(Adw.Window):
         page.set_margin_end(24)
         clamp.set_child(page)
 
-        title = Gtk.Label(label="回收站", xalign=0)
-        title.add_css_class("title-1")
-        page.append(title)
-        hint = Gtk.Label(
-            label=f"移入这里的 Claude Code / Codex 对话不会再被对应 CLI 识别，保留 {RETENTION_DAYS} 天后自动永久删除。",
+        self.trash_heading = Gtk.Label(label="Claude Code 回收站", xalign=0)
+        self.trash_heading.add_css_class("title-1")
+        page.append(self.trash_heading)
+        self.trash_hint = Gtk.Label(
+            label=f"移入这里的 Claude Code 对话不会再被 Claude Code 识别，保留 {RETENTION_DAYS} 天后自动永久删除。",
             xalign=0,
             wrap=True,
         )
-        hint.add_css_class("dim-label")
-        page.append(hint)
+        self.trash_hint.add_css_class("dim-label")
+        page.append(self.trash_hint)
 
         self.trash_group = Adw.PreferencesGroup()
         page.append(self.trash_group)
@@ -237,8 +277,13 @@ class ConversationWindow(Adw.Window):
         self.category_rows.clear()
         categories = ["全部", *self.manager.categories()]
         counts = {category: 0 for category in categories}
-        counts["全部"] = len(self.conversations)
-        for conversation in self.conversations:
+        provider_conversations = [
+            conversation
+            for conversation in self.conversations
+            if conversation.provider == self.selected_provider
+        ]
+        counts["全部"] = len(provider_conversations)
+        for conversation in provider_conversations:
             counts[conversation.category] = counts.get(conversation.category, 0) + 1
 
         selected_row: Gtk.ListBoxRow | None = None
@@ -307,12 +352,11 @@ class ConversationWindow(Adw.Window):
 
     def _filtered_conversations(self) -> list[Conversation]:
         query = self.search.get_text().strip().casefold()
-        provider = self.provider_filter.get_active_id() or "all"
         result: list[Conversation] = []
         for conversation in self.conversations:
-            if self.selected_category != "全部" and conversation.category != self.selected_category:
+            if conversation.provider != self.selected_provider:
                 continue
-            if provider != "all" and conversation.provider != provider:
+            if self.selected_category != "全部" and conversation.category != self.selected_category:
                 continue
             if query:
                 haystack = " ".join(
@@ -334,23 +378,28 @@ class ConversationWindow(Adw.Window):
         self._clear_active_group()
         records = self._filtered_conversations()
         self.active_empty.set_visible(not records)
+        provider_label = "Claude Code" if self.selected_provider == "claude" else "Codex"
         if self.selected_category == "全部":
-            self.category_heading.set_label(f"全部对话 · {len(records)}")
+            self.category_heading.set_label(f"{provider_label} · 全部对话 · {len(records)}")
             self.clear_category_button.set_sensitive(False)
         else:
-            self.category_heading.set_label(f"{self.selected_category} · {len(records)}")
+            self.category_heading.set_label(
+                f"{provider_label} · {self.selected_category} · {len(records)}"
+            )
             category_count = sum(
-                1 for item in self.conversations if item.category == self.selected_category
+                1
+                for item in self.conversations
+                if item.provider == self.selected_provider
+                and item.category == self.selected_category
             )
             self.clear_category_button.set_sensitive(category_count > 0)
 
         categories = self.manager.categories()
         for conversation in records:
             row = Adw.ActionRow(title=conversation.title)
-            provider = "Claude Code" if conversation.provider == "claude" else "Codex"
             project = Path(conversation.cwd).name if conversation.cwd else "目录未知"
             row.set_subtitle(
-                f"{provider} · {project} · {_format_time(conversation.updated_at)} · {_format_bytes(conversation.size_bytes)}"
+                f"{project} · {_format_time(conversation.updated_at)} · {_format_bytes(conversation.size_bytes)}"
             )
 
             combo = Gtk.ComboBoxText()
@@ -398,7 +447,9 @@ class ConversationWindow(Adw.Window):
     def _clear_selected_category(self, _button: Gtk.Button) -> None:
         if self.selected_category == "全部":
             return
-        moved, errors = self.manager.move_category_to_trash(self.selected_category)
+        moved, errors = self.manager.move_category_to_trash(
+            self.selected_category, provider=self.selected_provider
+        )
         if moved:
             self._toast(f"已将“{self.selected_category}”中的 {moved} 条对话移入回收站")
         if errors:
@@ -414,14 +465,23 @@ class ConversationWindow(Adw.Window):
         if not hasattr(self, "trash"):
             return
         self._clear_trash_group()
-        self.trash_empty.set_visible(not self.trash)
+        entries = [
+            entry for entry in self.trash if entry.provider == self.selected_provider
+        ]
+        provider_label = "Claude Code" if self.selected_provider == "claude" else "Codex"
+        self.trash_heading.set_label(f"{provider_label} 回收站 · {len(entries)}")
+        self.trash_hint.set_label(
+            f"移入这里的 {provider_label} 对话不会再被 {provider_label} 识别，"
+            f"保留 {RETENTION_DAYS} 天后自动永久删除。"
+        )
+        self.trash_empty.set_label(f"{provider_label} 回收站为空")
+        self.trash_empty.set_visible(not entries)
         now = time.time()
-        for entry in self.trash:
-            provider = "Claude Code" if entry.provider == "claude" else "Codex"
+        for entry in entries:
             days = max(0, math.ceil((entry.expires_at - now) / 86400))
             row = Adw.ActionRow(title=entry.title)
             project = Path(entry.cwd).name if entry.cwd else "目录未知"
-            row.set_subtitle(f"{provider} · {entry.category} · {project} · {days} 天后永久删除")
+            row.set_subtitle(f"{entry.category} · {project} · {days} 天后永久删除")
 
             restore = Gtk.Button(label="恢复")
             restore.set_valign(Gtk.Align.CENTER)

@@ -25,7 +25,7 @@ not reproduce the IP/country observed during preflight.
 
 ## AI conversation manager
 
-Fingerprint Terminal can manage local Claude Code and Codex conversation histories from the Settings window. Click **AI 对话** to open the visual manager. It supports custom categories, per-conversation categorization, provider/search filters, one-click category cleanup, restore, and permanent deletion.
+Fingerprint Terminal can manage local Claude Code and Codex conversation histories from the Settings window. Click **AI 对话** to open the visual manager. Claude Code and Codex are separate top-level views, each with its own filtered category counts, active list, and recycle-bin view. It supports custom categories, per-conversation categorization, search, one-click provider-scoped category cleanup, restore, and permanent deletion.
 
 Moving a conversation to the Fingerprint Terminal trash removes the provider's resumable conversation artifact and its related local indexes. Claude Code project history/sidecars and Codex session indexes/thread rows are handled separately; authentication, settings, plugins, and Codex memories are not modified. Trashed conversations therefore stop appearing to the corresponding CLI while remaining recoverable for 14 days.
 

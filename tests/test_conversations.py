@@ -143,6 +143,18 @@ class ConversationManagerTests(unittest.TestCase):
         self.assertEqual(records[f"claude:{CLAUDE_ID}"].category, "重要项目")
 
     @patch("fingerprint_terminal.conversations.provider_is_running", return_value=False)
+    def test_bulk_category_trash_can_be_scoped_to_provider(self, _running) -> None:
+        claude_key = f"claude:{CLAUDE_ID}"
+        codex_key = f"codex:{CODEX_ID}"
+        self.manager.assign_category(claude_key, "工作")
+        self.manager.assign_category(codex_key, "工作")
+        moved, errors = self.manager.move_category_to_trash("工作", provider="claude")
+        self.assertEqual((moved, errors), (1, []))
+        remaining = {item.key for item in self.manager.discover()}
+        self.assertNotIn(claude_key, remaining)
+        self.assertIn(codex_key, remaining)
+
+    @patch("fingerprint_terminal.conversations.provider_is_running", return_value=False)
     def test_claude_trash_hides_and_restore_recovers(self, _running) -> None:
         key = f"claude:{CLAUDE_ID}"
         self.manager.move_to_trash(key)

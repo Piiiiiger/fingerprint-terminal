@@ -280,7 +280,26 @@ def _sqlite_restore_rows(database: Path, snapshot: dict[str, Any]) -> None:
         connection.close()
 
 
-def provider_is_running(provider: str) -> bool:
+def _process_belongs_to_profile(pid: int, profile_id: str) -> bool:
+    """Return whether *pid* is inside this Fingerprint Terminal profile.
+
+    Host Claude/Codex processes and processes from other sandboxes can have the
+    same executable name.  Strict Fingerprint Terminal sessions are
+    distinguishable by the private profile HOME bind mount recorded in the
+    process mount table.
+    """
+
+    marker = f"fingerprint-terminal/profiles/{profile_id}/home"
+    try:
+        mountinfo = Path(f"/proc/{pid}/mountinfo").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return False
+    return marker in mountinfo
+
+
+def provider_is_running(provider: str, profile_id: str = "strict-auto-ip") -> bool:
     expected = {"claude": "claude", "codex": "codex"}.get(provider)
     if expected is None:
         return False
@@ -292,10 +311,12 @@ def provider_is_running(provider: str) -> bool:
             continue
         try:
             if (entry / "comm").read_text(encoding="utf-8").strip() == expected:
-                return True
+                if _process_belongs_to_profile(int(entry.name), profile_id):
+                    return True
             raw = (entry / "cmdline").read_bytes().split(b"\0")
             if raw and Path(raw[0].decode("utf-8", errors="ignore")).name == expected:
-                return True
+                if _process_belongs_to_profile(int(entry.name), profile_id):
+                    return True
         except (OSError, UnicodeError):
             continue
     return False
@@ -577,7 +598,7 @@ class ConversationManager:
 
     def move_to_trash(self, key: str) -> TrashEntry:
         conversation = self._active_by_key(key)
-        if provider_is_running(conversation.provider):
+        if provider_is_running(conversation.provider, self.profile_id):
             label = "Claude Code" if conversation.provider == "claude" else "Codex"
             raise ConversationError(f"请先退出正在运行的 {label}，再移动其会话")
         destination = self.trash_root / conversation.provider / conversation.session_id
@@ -661,7 +682,7 @@ class ConversationManager:
         entry = next((item for item in self.trash_entries() if item.key == key), None)
         if entry is None:
             raise ConversationError("回收站中找不到该会话")
-        if provider_is_running(entry.provider):
+        if provider_is_running(entry.provider, self.profile_id):
             label = "Claude Code" if entry.provider == "claude" else "Codex"
             raise ConversationError(f"请先退出正在运行的 {label}，再恢复其会话")
         directory = Path(entry.entry_dir)
@@ -714,8 +735,15 @@ class ConversationManager:
         metadata.setdefault("assignments", {}).pop(key, None)
         self._save_metadata(metadata)
 
-    def move_category_to_trash(self, category: str) -> tuple[int, list[str]]:
-        targets = [item for item in self.discover() if item.category == category]
+    def move_category_to_trash(
+        self, category: str, provider: str | None = None
+    ) -> tuple[int, list[str]]:
+        targets = [
+            item
+            for item in self.discover()
+            if item.category == category
+            and (provider is None or item.provider == provider)
+        ]
         moved = 0
         errors: list[str] = []
         for conversation in targets:
