@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import gi
@@ -35,6 +35,16 @@ def _format_time(value: float) -> str:
     if value <= 0:
         return "时间未知"
     return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M")
+
+
+def _date_bound(value: str, *, end: bool = False) -> float | None:
+    text = value.strip()
+    if not text:
+        return None
+    moment = datetime.strptime(text, "%Y-%m-%d")
+    if end:
+        moment += timedelta(days=1)
+    return moment.timestamp()
 
 
 class ConversationWindow(Adw.Window):
@@ -186,12 +196,46 @@ class ConversationWindow(Adw.Window):
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self.search = Gtk.SearchEntry()
-        self.search.set_placeholder_text("搜索标题、项目或会话 ID")
+        self.search.set_placeholder_text("搜索标题")
         self.search.set_hexpand(True)
         self.search.connect("search-changed", lambda _entry: self._refresh_active_rows())
         controls.append(self.search)
 
         right.append(controls)
+
+        date_controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        date_label = Gtk.Label(label="日期范围")
+        date_label.add_css_class("dim-label")
+        date_controls.append(date_label)
+
+        self.start_date = Gtk.Entry()
+        self.start_date.set_placeholder_text("开始 YYYY-MM-DD")
+        self.start_date.set_max_length(10)
+        self.start_date.set_width_chars(13)
+        self.start_date.connect("changed", lambda _entry: self._refresh_active_rows())
+        date_controls.append(self.start_date)
+
+        dash = Gtk.Label(label="—")
+        dash.add_css_class("dim-label")
+        date_controls.append(dash)
+
+        self.end_date = Gtk.Entry()
+        self.end_date.set_placeholder_text("结束 YYYY-MM-DD")
+        self.end_date.set_max_length(10)
+        self.end_date.set_width_chars(13)
+        self.end_date.connect("changed", lambda _entry: self._refresh_active_rows())
+        date_controls.append(self.end_date)
+
+        clear_dates = Gtk.Button(label="清除日期")
+        clear_dates.add_css_class("flat")
+        clear_dates.connect("clicked", self._clear_date_filter)
+        date_controls.append(clear_dates)
+        right.append(date_controls)
+
+        self.date_error = Gtk.Label(xalign=0)
+        self.date_error.add_css_class("error")
+        self.date_error.set_visible(False)
+        right.append(self.date_error)
 
         category_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         category_header.set_margin_top(2)
@@ -350,25 +394,43 @@ class ConversationWindow(Adw.Window):
             self.active_group.remove(row)
         self.active_rows.clear()
 
+    def _clear_date_filter(self, _button: Gtk.Button) -> None:
+        self.start_date.set_text("")
+        self.end_date.set_text("")
+
+    def _date_bounds(self) -> tuple[float | None, float | None] | None:
+        try:
+            start = _date_bound(self.start_date.get_text())
+            end = _date_bound(self.end_date.get_text(), end=True)
+        except ValueError:
+            self.date_error.set_label("日期格式应为 YYYY-MM-DD，例如 2026-09-16")
+            self.date_error.set_visible(True)
+            return None
+        if start is not None and end is not None and start >= end:
+            self.date_error.set_label("开始日期不能晚于结束日期")
+            self.date_error.set_visible(True)
+            return None
+        self.date_error.set_visible(False)
+        return start, end
+
     def _filtered_conversations(self) -> list[Conversation]:
         query = self.search.get_text().strip().casefold()
+        bounds = self._date_bounds()
+        if bounds is None:
+            return []
+        start, end = bounds
         result: list[Conversation] = []
         for conversation in self.conversations:
             if conversation.provider != self.selected_provider:
                 continue
             if self.selected_category != "全部" and conversation.category != self.selected_category:
                 continue
-            if query:
-                haystack = " ".join(
-                    (
-                        conversation.title,
-                        conversation.cwd,
-                        conversation.session_id,
-                        conversation.category,
-                    )
-                ).casefold()
-                if query not in haystack:
-                    continue
+            if query and query not in conversation.title.casefold():
+                continue
+            if start is not None and conversation.updated_at < start:
+                continue
+            if end is not None and conversation.updated_at >= end:
+                continue
             result.append(conversation)
         return result
 
@@ -413,6 +475,18 @@ class ConversationWindow(Adw.Window):
             combo.connect("changed", self._category_changed, conversation.key)
             row.add_suffix(combo)
 
+            edit = Gtk.Button(icon_name="document-edit-symbolic")
+            edit.add_css_class("flat")
+            edit.set_tooltip_text("修改标题")
+            edit.set_valign(Gtk.Align.CENTER)
+            edit.connect(
+                "clicked",
+                self._edit_title,
+                conversation.key,
+                conversation.title,
+            )
+            row.add_suffix(edit)
+
             trash = Gtk.Button(icon_name="user-trash-symbolic")
             trash.add_css_class("flat")
             trash.set_tooltip_text("移入回收站")
@@ -421,6 +495,49 @@ class ConversationWindow(Adw.Window):
             row.add_suffix(trash)
             self.active_group.add(row)
             self.active_rows.append(row)
+
+    def _edit_title(
+        self,
+        _button: Gtk.Button,
+        key: str,
+        current_title: str,
+    ) -> None:
+        dialog = Adw.MessageDialog.new(self, "修改对话标题", "")
+        dialog.add_response("cancel", "取消")
+        dialog.add_response("save", "保存")
+        dialog.set_default_response("save")
+        dialog.set_close_response("cancel")
+        dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+
+        entry = Gtk.Entry()
+        entry.set_text(current_title)
+        entry.set_max_length(200)
+        entry.set_hexpand(True)
+        entry.set_activates_default(True)
+        entry.set_margin_top(8)
+        entry.set_margin_bottom(4)
+        dialog.set_extra_child(entry)
+        dialog.connect("response", self._edit_title_response, key, entry)
+        dialog.present()
+        entry.grab_focus()
+        entry.select_region(0, -1)
+
+    def _edit_title_response(
+        self,
+        dialog: Adw.MessageDialog,
+        response: str,
+        key: str,
+        entry: Gtk.Entry,
+    ) -> None:
+        if response != "save":
+            return
+        try:
+            self.manager.rename_conversation(key, entry.get_text())
+        except ConversationError as exc:
+            self._toast(str(exc))
+            return
+        self._toast("标题已更新")
+        self.refresh()
 
     def _category_changed(self, combo: Gtk.ComboBoxText, key: str) -> None:
         category = combo.get_active_text()

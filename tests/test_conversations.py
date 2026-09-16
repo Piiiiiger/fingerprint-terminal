@@ -201,5 +201,39 @@ class ConversationManagerTests(unittest.TestCase):
         self.assertNotIn(key, {item.key for item in later.trash_entries()})
 
 
+    @patch("fingerprint_terminal.conversations.provider_is_running", return_value=False)
+    def test_rename_claude_updates_session_and_discovery(self, _running) -> None:
+        key = f"claude:{CLAUDE_ID}"
+        self.manager.rename_conversation(key, "新的 Claude 标题")
+        record = next(item for item in self.manager.discover() if item.key == key)
+        self.assertEqual(record.title, "新的 Claude 标题")
+        values = [json.loads(line) for line in Path(record.source_path).read_text().splitlines()]
+        self.assertEqual(values[-1]["type"], "ai-title")
+        self.assertEqual(values[-1]["aiTitle"], "新的 Claude 标题")
+        self.assertEqual(values[-1]["sessionId"], CLAUDE_ID)
+
+    @patch("fingerprint_terminal.conversations.provider_is_running", return_value=False)
+    def test_rename_codex_updates_database_index_and_discovery(self, _running) -> None:
+        key = f"codex:{CODEX_ID}"
+        self.manager.rename_conversation(key, "新的 Codex 标题")
+        record = next(item for item in self.manager.discover() if item.key == key)
+        self.assertEqual(record.title, "新的 Codex 标题")
+
+        connection = sqlite3.connect(self.manager.home / ".codex" / "state_5.sqlite")
+        row = connection.execute(
+            "select title from threads where id = ?", (CODEX_ID,)
+        ).fetchone()
+        connection.close()
+        self.assertEqual(row, ("新的 Codex 标题",))
+
+        index = self.manager.home / ".codex" / "session_index.jsonl"
+        names = []
+        for line in index.read_text().splitlines():
+            value = json.loads(line)
+            if value.get("id") == CODEX_ID:
+                names.append(value.get("thread_name"))
+        self.assertEqual(names, ["新的 Codex 标题"])
+
+
 if __name__ == "__main__":
     unittest.main()

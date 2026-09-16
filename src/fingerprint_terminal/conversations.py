@@ -108,6 +108,32 @@ def _atomic_write(path: Path, data: str) -> None:
     os.replace(temporary, path)
 
 
+def _update_jsonl_records(
+    path: Path,
+    predicate: Callable[[dict[str, Any]], bool],
+    update: Callable[[dict[str, Any]], dict[str, Any]],
+) -> int:
+    if not path.is_file():
+        return 0
+    changed = 0
+    output: list[str] = []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError:
+                output.append(raw)
+                continue
+            if isinstance(value, dict) and predicate(value):
+                value = update(dict(value))
+                raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n"
+                changed += 1
+            output.append(raw)
+    if changed:
+        _atomic_write(path, "".join(output))
+    return changed
+
+
 def _remove_jsonl_records(
     path: Path,
     predicate: Callable[[dict[str, Any]], bool],
@@ -348,6 +374,8 @@ class ConversationManager:
                     categories = value.get("categories")
                     assignments = value.get("assignments")
                     if isinstance(categories, list) and isinstance(assignments, dict):
+                        if not isinstance(value.get("title_overrides"), dict):
+                            value["title_overrides"] = {}
                         return value
             except (OSError, json.JSONDecodeError):
                 pass
@@ -355,6 +383,7 @@ class ConversationManager:
             "version": 1,
             "categories": list(DEFAULT_CATEGORIES),
             "assignments": {},
+            "title_overrides": {},
         }
 
     def _save_metadata(self, metadata: dict[str, Any]) -> None:
@@ -405,6 +434,124 @@ class ConversationManager:
         value = str(metadata.get("assignments", {}).get(f"{provider}:{session_id}", "未分类"))
         return value if value in self.categories() else "未分类"
 
+    def _title_for(
+        self,
+        provider: str,
+        session_id: str,
+        provider_title: str,
+        metadata: dict[str, Any],
+    ) -> str:
+        override = str(
+            metadata.get("title_overrides", {}).get(f"{provider}:{session_id}", "")
+            or ""
+        ).strip()
+        return override or provider_title
+
+    def rename_conversation(self, key: str, title: str) -> None:
+        new_title = " ".join(str(title).split()).strip()
+        if not new_title:
+            raise ConversationError("标题不能为空")
+        if len(new_title) > 200:
+            raise ConversationError("标题不能超过 200 个字符")
+
+        conversation = self._active_by_key(key)
+        if provider_is_running(conversation.provider, self.profile_id):
+            label = "Claude Code" if conversation.provider == "claude" else "Codex"
+            raise ConversationError(f"请先退出正在运行的 {label}，再修改标题")
+
+        if conversation.provider == "claude":
+            self._rename_claude(conversation, new_title)
+        elif conversation.provider == "codex":
+            self._rename_codex(conversation, new_title)
+        else:
+            raise ConversationError(f"不支持的对话来源：{conversation.provider}")
+
+        metadata = self._metadata()
+        metadata.setdefault("title_overrides", {})[conversation.key] = new_title
+        self._save_metadata(metadata)
+
+    def _rename_claude(self, conversation: Conversation, title: str) -> None:
+        path = Path(conversation.source_path)
+        if not path.is_file():
+            raise ConversationError("Claude Code 会话文件已经不存在")
+        record = {
+            "type": "ai-title",
+            "aiTitle": title,
+            "sessionId": conversation.session_id,
+        }
+        encoded = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+        try:
+            with path.open("ab+") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                if size:
+                    handle.seek(-1, os.SEEK_END)
+                    if handle.read(1) not in (b"\n", b"\r"):
+                        handle.seek(0, os.SEEK_END)
+                        handle.write(b"\n")
+                handle.seek(0, os.SEEK_END)
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise ConversationError(f"无法写入 Claude Code 标题：{exc}") from exc
+
+    def _rename_codex(self, conversation: Conversation, title: str) -> None:
+        session_id = conversation.session_id
+        state_db = self.home / ".codex" / "state_5.sqlite"
+        updated_database = False
+        database_error: sqlite3.Error | None = None
+        if state_db.is_file():
+            connection: sqlite3.Connection | None = None
+            try:
+                connection = sqlite3.connect(state_db)
+                columns = {
+                    str(row[1]) for row in connection.execute('pragma table_info("threads")')
+                }
+                assignments: list[str] = []
+                values: list[Any] = []
+                for column in ("title", "name"):
+                    if column in columns:
+                        assignments.append(f'"{column}" = ?')
+                        values.append(title)
+                if assignments:
+                    cursor = connection.execute(
+                        f'update "threads" set {", ".join(assignments)} where "id" = ?',
+                        (*values, session_id),
+                    )
+                    updated_database = cursor.rowcount > 0
+                connection.commit()
+            except sqlite3.Error as exc:
+                database_error = exc
+            finally:
+                if connection is not None:
+                    connection.close()
+
+        index = self.home / ".codex" / "session_index.jsonl"
+
+        def matches(value: dict[str, Any]) -> bool:
+            return str(value.get("id") or value.get("session_id") or "") == session_id
+
+        def renamed(value: dict[str, Any]) -> dict[str, Any]:
+            value["thread_name"] = title
+            if "title" in value:
+                value["title"] = title
+            return value
+
+        try:
+            updated_index = _update_jsonl_records(index, matches, renamed)
+        except OSError as exc:
+            raise ConversationError(f"无法更新 Codex 会话索引：{exc}") from exc
+
+        if not updated_database and not updated_index and database_error is not None:
+            raise ConversationError(f"无法更新 Codex 标题数据库：{database_error}") from database_error
+        if not updated_database and not updated_index:
+            # Keep the Fingerprint Terminal override so title editing still works
+            # with Codex versions that no longer expose either legacy index.
+            return
+
     def discover(self) -> list[Conversation]:
         metadata = self._metadata()
         conversations = [*self._discover_claude(metadata), *self._discover_codex(metadata)]
@@ -437,7 +584,12 @@ class ConversationManager:
                         title = str(value["aiTitle"])
                     elif value.get("type") == "last-prompt" and value.get("lastPrompt"):
                         fallback_prompt = str(value["lastPrompt"])
-                title = _clean_title(title or fallback_prompt, f"Claude 会话 {session_id[:8]}")
+                title = self._title_for(
+                    "claude",
+                    session_id,
+                    _clean_title(title or fallback_prompt, f"Claude 会话 {session_id[:8]}"),
+                    metadata,
+                )
                 related = [
                     path,
                     project / session_id,
@@ -529,7 +681,12 @@ class ConversationManager:
                 ),
                 "",
             )
-            title = _clean_title(title, f"Codex 会话 {session_id[:8]}")
+            title = self._title_for(
+                "codex",
+                session_id,
+                _clean_title(title, f"Codex 会话 {session_id[:8]}"),
+                metadata,
+            )
             related = [path, *sorted((root / "shell_snapshots").glob(f"{session_id}.*"))]
             result.append(
                 Conversation(
@@ -733,6 +890,7 @@ class ConversationManager:
         shutil.rmtree(entry.entry_dir)
         metadata = self._metadata()
         metadata.setdefault("assignments", {}).pop(key, None)
+        metadata.setdefault("title_overrides", {}).pop(key, None)
         self._save_metadata(metadata)
 
     def move_category_to_trash(
