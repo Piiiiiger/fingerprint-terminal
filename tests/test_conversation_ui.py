@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from fingerprint_terminal.conversation_ui import (
     AUTO_CATEGORY_RECENT,
+    AUTO_CATEGORY_RECOMMENDED_DELETE,
     AUTO_CATEGORY_THREE_DAYS,
     ConversationWindow,
     _automatic_category_records,
@@ -92,6 +93,57 @@ class ConversationUiTests(unittest.TestCase):
         dummy.selected_category = "工作"
         counts = ConversationWindow._available_date_counts(dummy)
         self.assertEqual(counts, {date(2026, 9, 16): 1, date(2026, 9, 18): 1})
+
+
+    def test_recommended_delete_requires_seven_days_and_no_manual_category(self) -> None:
+        now = datetime(2026, 9, 17, 12, 0, 0).timestamp()
+        records = [
+            Conversation(
+                provider="codex",
+                session_id="old-unclassified",
+                title="old unclassified",
+                cwd="/tmp",
+                updated_at=now - 8 * 24 * 60 * 60,
+                source_path="/tmp/old-unclassified.jsonl",
+                category="未分类",
+            ),
+            Conversation(
+                provider="codex",
+                session_id="old-manual",
+                title="old manual",
+                cwd="/tmp",
+                updated_at=now - 30 * 24 * 60 * 60,
+                source_path="/tmp/old-manual.jsonl",
+                category="学习",
+            ),
+            Conversation(
+                provider="codex",
+                session_id="recent-unclassified",
+                title="recent unclassified",
+                cwd="/tmp",
+                updated_at=now - 6 * 24 * 60 * 60,
+                source_path="/tmp/recent-unclassified.jsonl",
+                category="未分类",
+            ),
+            Conversation(
+                provider="codex",
+                session_id="exactly-seven-days",
+                title="exactly seven days",
+                cwd="/tmp",
+                updated_at=now - 7 * 24 * 60 * 60,
+                source_path="/tmp/exactly-seven-days.jsonl",
+                category="未分类",
+            ),
+        ]
+
+        result = _automatic_category_records(
+            records, AUTO_CATEGORY_RECOMMENDED_DELETE, now=now
+        )
+
+        self.assertEqual(
+            [item.session_id for item in result],
+            ["exactly-seven-days", "old-unclassified"],
+        )
 
 
 if __name__ == "__main__":

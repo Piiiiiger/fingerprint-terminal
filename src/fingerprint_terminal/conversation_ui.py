@@ -25,9 +25,15 @@ from .conversations import (
 
 AUTO_CATEGORY_RECENT = "最近使用"
 AUTO_CATEGORY_THREE_DAYS = "近三天使用"
-AUTO_CATEGORIES = (AUTO_CATEGORY_RECENT, AUTO_CATEGORY_THREE_DAYS)
+AUTO_CATEGORY_RECOMMENDED_DELETE = "推荐删除"
+AUTO_CATEGORIES = (
+    AUTO_CATEGORY_RECENT,
+    AUTO_CATEGORY_THREE_DAYS,
+    AUTO_CATEGORY_RECOMMENDED_DELETE,
+)
 AUTO_CATEGORY_LIMIT = 5
 THREE_DAYS_SECONDS = 3 * 24 * 60 * 60
+SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60
 
 
 def _automatic_category_records(
@@ -42,6 +48,14 @@ def _automatic_category_records(
         current = time.time() if now is None else now
         cutoff = current - THREE_DAYS_SECONDS
         return [item for item in ordered if item.updated_at >= cutoff][:AUTO_CATEGORY_LIMIT]
+    if category == AUTO_CATEGORY_RECOMMENDED_DELETE:
+        current = time.time() if now is None else now
+        cutoff = current - SEVEN_DAYS_SECONDS
+        return [
+            item
+            for item in ordered
+            if item.category == "未分类" and item.updated_at <= cutoff
+        ]
     return ordered
 
 
