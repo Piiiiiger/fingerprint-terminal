@@ -23,6 +23,39 @@ from .conversations import (
 )
 
 
+AUTO_CATEGORY_RECENT = "最近使用"
+AUTO_CATEGORY_THREE_DAYS = "近三天使用"
+AUTO_CATEGORIES = (AUTO_CATEGORY_RECENT, AUTO_CATEGORY_THREE_DAYS)
+AUTO_CATEGORY_LIMIT = 5
+THREE_DAYS_SECONDS = 3 * 24 * 60 * 60
+
+
+def _automatic_category_records(
+    records: list[Conversation], category: str, *, now: float | None = None
+) -> list[Conversation]:
+    """Return a dynamic category view without changing manual categories."""
+
+    ordered = sorted(records, key=lambda item: item.updated_at, reverse=True)
+    if category == AUTO_CATEGORY_RECENT:
+        return ordered[:AUTO_CATEGORY_LIMIT]
+    if category == AUTO_CATEGORY_THREE_DAYS:
+        current = time.time() if now is None else now
+        cutoff = current - THREE_DAYS_SECONDS
+        return [item for item in ordered if item.updated_at >= cutoff][:AUTO_CATEGORY_LIMIT]
+    return ordered
+
+
+def _records_for_category(
+    records: list[Conversation], provider: str, category: str
+) -> list[Conversation]:
+    provider_records = [item for item in records if item.provider == provider]
+    if category == "全部":
+        return provider_records
+    if category in AUTO_CATEGORIES:
+        return _automatic_category_records(provider_records, category)
+    return [item for item in provider_records if item.category == category]
+
+
 def _format_bytes(value: int) -> str:
     size = float(max(0, value))
     for unit in ("B", "KB", "MB", "GB"):
@@ -208,7 +241,7 @@ class ConversationWindow(Adw.Window):
         right.append(controls)
 
         date_controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        date_label = Gtk.Label(label="日期范围")
+        date_label = Gtk.Label(label="最近使用日期")
         date_label.add_css_class("dim-label")
         date_controls.append(date_label)
 
@@ -316,7 +349,7 @@ class ConversationWindow(Adw.Window):
         previous = self.selected_category
         self._clear_listbox(self.category_list)
         self.category_rows.clear()
-        categories = ["全部", *self.manager.categories()]
+        categories = ["全部", *AUTO_CATEGORIES, *self.manager.categories()]
         counts = {category: 0 for category in categories}
         provider_conversations = [
             conversation
@@ -324,6 +357,10 @@ class ConversationWindow(Adw.Window):
             if conversation.provider == self.selected_provider
         ]
         counts["全部"] = len(provider_conversations)
+        for category in AUTO_CATEGORIES:
+            counts[category] = len(
+                _automatic_category_records(provider_conversations, category)
+            )
         for conversation in provider_conversations:
             counts[conversation.category] = counts.get(conversation.category, 0) + 1
 
@@ -341,7 +378,7 @@ class ConversationWindow(Adw.Window):
             count = Gtk.Label(label=str(counts.get(category, 0)))
             count.add_css_class("dim-label")
             content.append(count)
-            if category not in {"全部", "未分类"}:
+            if category not in {"全部", "未分类", *AUTO_CATEGORIES}:
                 remove = Gtk.Button(icon_name="window-close-symbolic")
                 remove.add_css_class("flat")
                 remove.set_tooltip_text("删除分类；其中的对话会回到“未分类”")
@@ -365,8 +402,12 @@ class ConversationWindow(Adw.Window):
         self._refresh_active_rows()
 
     def _add_category(self, _widget: Gtk.Widget) -> None:
+        requested = " ".join(self.category_entry.get_text().strip().split())
+        if requested in AUTO_CATEGORIES:
+            self._toast(f"“{requested}”是自动分类，不能创建同名手动分类")
+            return
         try:
-            name = self.manager.add_category(self.category_entry.get_text())
+            name = self.manager.add_category(requested)
         except ConversationError as exc:
             self._toast(str(exc))
             return
@@ -395,11 +436,9 @@ class ConversationWindow(Adw.Window):
         counts: dict[date, int] = {}
         if not hasattr(self, "conversations"):
             return counts
-        for conversation in self.conversations:
-            if conversation.provider != self.selected_provider:
-                continue
-            if self.selected_category != "全部" and conversation.category != self.selected_category:
-                continue
+        for conversation in _records_for_category(
+            self.conversations, self.selected_provider, self.selected_category
+        ):
             if conversation.updated_at <= 0:
                 continue
             day = datetime.fromtimestamp(conversation.updated_at).date()
@@ -589,14 +628,15 @@ class ConversationWindow(Adw.Window):
         self._sync_date_controls()
         self._refresh_active_rows()
 
+    def _category_records(self) -> list[Conversation]:
+        return _records_for_category(
+            self.conversations, self.selected_provider, self.selected_category
+        )
+
     def _filtered_conversations(self) -> list[Conversation]:
         query = self.search.get_text().strip().casefold()
         result: list[Conversation] = []
-        for conversation in self.conversations:
-            if conversation.provider != self.selected_provider:
-                continue
-            if self.selected_category != "全部" and conversation.category != self.selected_category:
-                continue
+        for conversation in self._category_records():
             if query and query not in conversation.title.casefold():
                 continue
             day = datetime.fromtimestamp(conversation.updated_at).date()
@@ -617,6 +657,11 @@ class ConversationWindow(Adw.Window):
         provider_label = "Claude Code" if self.selected_provider == "claude" else "Codex"
         if self.selected_category == "全部":
             self.category_heading.set_label(f"{provider_label} · 全部对话 · {len(records)}")
+            self.clear_category_button.set_sensitive(False)
+        elif self.selected_category in AUTO_CATEGORIES:
+            self.category_heading.set_label(
+                f"{provider_label} · {self.selected_category} · {len(records)}"
+            )
             self.clear_category_button.set_sensitive(False)
         else:
             self.category_heading.set_label(

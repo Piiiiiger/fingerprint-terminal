@@ -4,7 +4,13 @@ import unittest
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
-from fingerprint_terminal.conversation_ui import ConversationWindow, _date_bound
+from fingerprint_terminal.conversation_ui import (
+    AUTO_CATEGORY_RECENT,
+    AUTO_CATEGORY_THREE_DAYS,
+    ConversationWindow,
+    _automatic_category_records,
+    _date_bound,
+)
 from fingerprint_terminal.conversations import Conversation
 
 
@@ -20,6 +26,43 @@ class ConversationUiTests(unittest.TestCase):
     def test_date_bound_rejects_invalid_date(self) -> None:
         with self.assertRaises(ValueError):
             _date_bound("2026-99-99")
+
+    def test_automatic_recent_categories_use_last_activity(self) -> None:
+        now = datetime(2026, 9, 17, 12, 0).timestamp()
+
+        def record(index: int, age_hours: int) -> Conversation:
+            return Conversation(
+                provider="codex",
+                session_id=f"session-{index}",
+                title=f"conversation {index}",
+                cwd="/home/test/code/vault",
+                updated_at=now - age_hours * 60 * 60,
+                source_path=f"/tmp/{index}.jsonl",
+            )
+
+        records = [
+            record(0, 1),
+            record(1, 24),
+            record(2, 48),
+            record(3, 71),
+            record(4, 73),
+            record(5, 96),
+        ]
+        recent = _automatic_category_records(
+            records, AUTO_CATEGORY_RECENT, now=now
+        )
+        three_days = _automatic_category_records(
+            records, AUTO_CATEGORY_THREE_DAYS, now=now
+        )
+
+        self.assertEqual(
+            [item.session_id for item in recent],
+            ["session-0", "session-1", "session-2", "session-3", "session-4"],
+        )
+        self.assertEqual(
+            [item.session_id for item in three_days],
+            ["session-0", "session-1", "session-2", "session-3"],
+        )
 
     def test_available_calendar_dates_follow_provider_and_category(self) -> None:
         def record(provider: str, day: int, category: str) -> Conversation:
