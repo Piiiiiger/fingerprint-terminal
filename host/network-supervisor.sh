@@ -207,8 +207,10 @@ if ! nsenter -t "$app_pid" -m -n -u -- env \
   exit 1
 fi
 
-printf 'Fingerprint Terminal: transparent exit locked to %s (%s)\n' \
-  "$FT_EXPECTED_IP" "$FT_COUNTRY_CODE" >&2
+if [[ "${FT_QUIET:-0}" != "1" ]]; then
+  printf 'Fingerprint Terminal: transparent exit locked to %s (%s)\n' \
+    "$FT_EXPECTED_IP" "$FT_COUNTRY_CODE" >&2
+fi
 
 # Match the reference desktop's locked-exit guard: once per minute, verify the
 # public IP/country from the same transparent namespace.  A transient network

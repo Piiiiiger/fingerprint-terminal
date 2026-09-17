@@ -36,6 +36,32 @@ fingerprint-terminal conversations status
 fingerprint-terminal conversations cleanup
 ```
 
+## Obsidian / Claudian bridge
+
+GUI applications can launch stdin/stdout-driven agent CLIs inside a profile
+without opening another terminal.  The `bridge` command preserves argv and
+stdio while applying the same strict filesystem, private HOME, transparent
+network, identity, and approved-share rules as an interactive terminal:
+
+```bash
+fingerprint-terminal bridge --profile strict-auto-ip \
+  --cwd /path/to/shared/vault -- codex app-server --listen stdio://
+```
+
+The installer exposes dedicated Claudian-compatible launchers at:
+
+```text
+~/.local/libexec/fingerprint-terminal/claude
+~/.local/libexec/fingerprint-terminal/codex
+```
+
+They forward the caller's current working directory through an already
+approved strict share.  When that share lives below the host HOME, the bridge
+also re-binds it at the same relative path inside the private HOME.  This lets
+an Obsidian vault such as `/home/user/code/vault` remain
+`/home/user/code/vault` from the agent's point of view without exposing any
+additional host directory.
+
 ## Quick start
 
 ```bash

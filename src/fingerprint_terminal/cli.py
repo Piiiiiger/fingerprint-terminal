@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import shutil
@@ -59,6 +60,17 @@ def build_parser() -> argparse.ArgumentParser:
     shell = sub.add_parser("shell", help="internal: apply a profile and execute its shell")
     shell.add_argument("--profile", required=True)
     shell.add_argument("--command", help="run a command through the profile shell instead of opening interactively")
+
+    bridge = sub.add_parser(
+        "bridge",
+        help="run an argv-preserving child inside a profile for GUI/stdio integrations",
+    )
+    bridge.add_argument("--profile", default="strict-auto-ip")
+    bridge.add_argument(
+        "--cwd",
+        help="host working directory to map through an approved strict share",
+    )
+    bridge.add_argument("command", nargs=argparse.REMAINDER)
 
     clone = sub.add_parser("clone", help="clone an existing profile")
     clone.add_argument("source")
@@ -174,6 +186,78 @@ def cmd_shell(profile_id: str, command: str | None) -> int:
     raise AssertionError("os.execve returned unexpectedly")
 
 
+def cmd_bridge(profile_id: str, cwd: str | None, command: Sequence[str]) -> int:
+    """Execute *command* inside a profile without inserting a shell or terminal.
+
+    This entrypoint is intended for GUI integrations that communicate with a CLI
+    over stdin/stdout (for example Codex app-server or Claude Code stream-json).
+    It deliberately emits no status text of its own and preserves the caller's
+    stdio file descriptors through exec.
+    """
+
+    child = [str(part) for part in command]
+    if child and child[0] == "--":
+        child = child[1:]
+    if not child:
+        raise ProfileError("bridge requires a child command after --")
+
+    profile = copy.deepcopy(load_store().get(profile_id))
+    strict = is_strict(profile)
+    if cwd:
+        host_cwd = Path(cwd).expanduser().resolve()
+        if not host_cwd.is_dir():
+            raise ProfileError(f"bridge cwd does not exist: {host_cwd}")
+
+        # GUI integrations commonly pass absolute vault paths to their agents.
+        # If the cwd is already covered by an approved strict share below the
+        # real host HOME, add an ephemeral duplicate bind at the same relative
+        # path inside the private HOME.  This exposes no new host content, but
+        # keeps /home/<user>/... paths identical on both sides of the bridge.
+        if strict:
+            host_home = Path.home().resolve()
+            shares = list(profile.get("sandbox", {}).get("shares", []) or [])
+            for share in shares:
+                source = Path(
+                    os.path.expandvars(str(share.get("source", "")))
+                ).expanduser().resolve()
+                try:
+                    host_cwd.relative_to(source)
+                    source_relative = source.relative_to(host_home)
+                except ValueError:
+                    continue
+                if source_relative.parts:
+                    duplicate = {
+                        "source": str(source),
+                        "target": source_relative.as_posix(),
+                        "mode": str(share.get("mode", "rw")),
+                    }
+                    sandbox = dict(profile.get("sandbox", {}))
+                    sandbox["shares"] = [duplicate, *shares]
+                    profile["sandbox"] = sandbox
+                break
+        profile.setdefault("terminal", {})["cwd"] = str(host_cwd)
+
+    env = build_environment(profile)
+    env["FT_QUIET"] = "1"
+    if not strict and cwd:
+        os.chdir(Path(cwd).expanduser().resolve())
+    else:
+        os.chdir("/")
+
+    if is_transparent(profile):
+        env, _identity = prepare_transparent_environment(profile, env)
+        if strict:
+            child = strict_command(profile, child, env)
+        isolated = isolation_command(child)
+        os.execvpe(isolated[0], isolated, env)
+        raise AssertionError("os.execvpe returned unexpectedly")
+
+    if strict:
+        child = strict_command(profile, child, env)
+    os.execvpe(child[0], child, env)
+    raise AssertionError("os.execvpe returned unexpectedly")
+
+
 def cmd_identity(profile_id: str) -> int:
     profile = load_store().get(profile_id)
     if not is_transparent(profile):
@@ -253,6 +337,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_launch(args.profile, dry_run=args.dry_run)
         if args.subcommand == "shell":
             return cmd_shell(args.profile, args.command)
+        if args.subcommand == "bridge":
+            return cmd_bridge(args.profile, args.cwd, args.command)
         if args.subcommand == "clone":
             return cmd_clone(args.source, args.new_id, args.name)
         if args.subcommand == "identity":
