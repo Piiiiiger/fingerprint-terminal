@@ -226,6 +226,13 @@ def cmd_bridge(profile_id: str, cwd: str | None, command: Sequence[str]) -> int:
                 except ValueError:
                     continue
                 if source_relative.parts:
+                    # If the configured share already preserves the host-home
+                    # relative path (for example Downloads -> Downloads), the
+                    # normal share is already reachable at the exact absolute
+                    # path expected by GUI integrations.  Do not add the same
+                    # bind a second time.
+                    if str(share.get("target", "")) == source_relative.as_posix():
+                        break
                     duplicate = {
                         "source": str(source),
                         "target": source_relative.as_posix(),

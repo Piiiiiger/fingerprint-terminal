@@ -29,6 +29,7 @@ class ManagerWindow(Adw.ApplicationWindow):
         self.set_size_request(620, 560)
         self.store = load_store()
         self.profile = self._load_default_profile()
+        self._share_chooser: Gtk.FileChooserNative | None = None
 
         self.toast_overlay = Adw.ToastOverlay()
         self.set_content(self.toast_overlay)
@@ -287,6 +288,10 @@ class ManagerWindow(Adw.ApplicationWindow):
         self._refresh()
 
     def _add_share(self, _button: Gtk.Button) -> None:
+        if self._share_chooser is not None:
+            self._share_chooser.show()
+            return
+
         chooser = Gtk.FileChooserNative.new(
             "选择要共享的本地目录",
             self,
@@ -294,21 +299,45 @@ class ManagerWindow(Adw.ApplicationWindow):
             "添加",
             "取消",
         )
+        # Keep the chooser rooted in the real host HOME.  The settings window
+        # can be opened while the caller's cwd points at the profile's private
+        # backing HOME; letting GTK inherit that cwd makes it very easy to pick
+        # an internal mountpoint instead of the intended host directory.
+        chooser.set_current_folder(Gio.File.new_for_path(str(Path.home().resolve())))
         chooser.connect("response", self._share_chooser_response)
+        # GtkNativeDialog is not part of the widget tree.  Retain a strong
+        # reference until the response arrives so the async native chooser
+        # cannot be finalized before we persist the selected directory.
+        self._share_chooser = chooser
         chooser.show()
 
     def _share_chooser_response(self, chooser: Gtk.FileChooserNative, response: int) -> None:
+        if chooser is self._share_chooser:
+            self._share_chooser = None
         if response != Gtk.ResponseType.ACCEPT:
             chooser.destroy()
             return
         selected = chooser.get_file()
         chooser.destroy()
         if selected is None or selected.get_path() is None:
+            self._toast("没有选到本地目录")
             return
 
         source = Path(selected.get_path()).resolve()
+        if not source.is_dir():
+            self._toast("选择的路径不是目录")
+            return
         if source == Path.home().resolve() or source == Path("/"):
             self._toast("不能共享整个宿主 Home 或根目录")
+            return
+
+        private_home = self._private_home_path().resolve()
+        try:
+            source.relative_to(private_home)
+        except ValueError:
+            pass
+        else:
+            self._toast("请选择宿主目录，不要选择私有 Home 里的内部目录")
             return
 
         shares = list(self.profile.get("sandbox", {}).get("shares", []) or [])
@@ -332,7 +361,7 @@ class ManagerWindow(Adw.ApplicationWindow):
         updated["sandbox"] = sandbox
         try:
             self._save_profile(updated)
-            self._toast(f"已共享 {source.name}")
+            self._toast(f"已共享 {source}")
         except ProfileError as exc:
             self._toast(f"保存失败：{exc}")
 
@@ -368,14 +397,88 @@ class ManagerWindow(Adw.ApplicationWindow):
         except ProfileError as exc:
             self._toast(f"保存失败：{exc}")
 
+    def _sync_private_home_hidden_entries(self, path: Path) -> None:
+        """Hide bridge-only compatibility mount roots from file-manager views."""
+
+        host_home = Path.home().resolve()
+        compatibility_roots: set[str] = set()
+        explicit_roots: set[str] = set()
+
+        for share in self.profile.get("sandbox", {}).get("shares", []) or []:
+            target = str(share.get("target", "") or "").strip()
+            target_parts = Path(target).parts
+            if target_parts:
+                explicit_roots.add(target_parts[0])
+
+            try:
+                source = Path(str(share.get("source", ""))).expanduser().resolve()
+                relative = source.relative_to(host_home)
+            except (OSError, ValueError):
+                continue
+            if relative.parts and relative.as_posix() != target:
+                compatibility_roots.add(relative.parts[0])
+
+        managed_now = compatibility_roots - explicit_roots
+        hidden_file = path / ".hidden"
+        marker_file = path / ".fingerprint-terminal-hidden"
+
+        try:
+            previous_managed = {
+                line.strip()
+                for line in marker_file.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            }
+        except OSError:
+            previous_managed = set()
+
+        try:
+            existing = [
+                line.strip()
+                for line in hidden_file.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        except OSError:
+            existing = []
+
+        user_entries = [entry for entry in existing if entry not in previous_managed]
+        combined = list(dict.fromkeys([*user_entries, *sorted(managed_now)]))
+
+        if combined:
+            hidden_file.write_text("\n".join(combined) + "\n", encoding="utf-8")
+        else:
+            hidden_file.unlink(missing_ok=True)
+
+        if managed_now:
+            marker_file.write_text(
+                "\n".join(sorted(managed_now)) + "\n",
+                encoding="utf-8",
+            )
+        else:
+            marker_file.unlink(missing_ok=True)
+
     def _open_private_home(self, _button: Gtk.Button | None) -> None:
         path = self._private_home_path()
         path.mkdir(parents=True, exist_ok=True)
         try:
-            Gio.AppInfo.launch_default_for_uri(path.resolve().as_uri(), None)
+            self._sync_private_home_hidden_entries(path)
+            # Thunar normally reuses an existing window, which makes an old
+            # Downloads tab sit next to the newly opened private HOME and looks
+            # as if Fingerprint Terminal opened two tabs.  Force a fresh window
+            # when Thunar is the default directory handler; keep the generic
+            # Gio path for other desktops/file managers.
+            app = Gio.AppInfo.get_default_for_type("inode/directory", True)
+            executable = app.get_executable() if app is not None else None
+            if executable and Path(executable).name == "thunar":
+                subprocess.Popen(
+                    [executable, "--window", str(path.resolve())],
+                    start_new_session=True,
+                )
+            else:
+                Gio.AppInfo.launch_default_for_uri(path.resolve().as_uri(), None)
             self._toast("已打开私有 Home")
-        except GLib.Error as exc:
-            self._toast(f"无法打开目录：{exc.message}")
+        except (GLib.Error, OSError) as exc:
+            message = exc.message if isinstance(exc, GLib.Error) else str(exc)
+            self._toast(f"无法打开目录：{message}")
 
     def _open_conversations(self, _button: Gtk.Button) -> None:
         from .conversation_ui import ConversationWindow
