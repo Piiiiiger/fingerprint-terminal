@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -96,6 +98,69 @@ class SandboxTests(unittest.TestCase):
             self.assertIn("/home/dev", command)
             self.assertIn(str(share.resolve()), command)
             self.assertIn("/home/dev/code", command)
+
+            setenv = {
+                command[index + 1]
+                for index, arg in enumerate(command)
+                if arg == "--setenv"
+            }
+            self.assertEqual([key for key in setenv if key.startswith("FT_")], [])
+            self.assertEqual(
+                command[command.index("HOSTNAME") + 1], "desktop-us-test"
+            )
+
+    def test_identity_files_are_copied_not_bind_mounted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            resolv = tmp_path / "resolv.conf"
+            resolv.write_text("nameserver 192.168.1.1\n", encoding="utf-8")
+            profile_root = tmp_path / "profiles"
+            profile = self.profile(str(tmp_path))
+            env = {"TZ": "UTC", "FT_RESOLV_CONF": str(resolv)}
+            with patch.object(sandbox, "PROFILE_DATA_ROOT", profile_root):
+                command = sandbox.strict_command(
+                    profile, ["/usr/bin/bash", "-l"], env
+                )
+
+            bwrap_args = command[command.index("--die-with-parent") - 1 :]
+            # The persistent HOME is the only host path under the profile
+            # storage that bwrap mounts; everything else is copied in.
+            self.assertEqual(
+                [arg for arg in bwrap_args if arg.startswith(str(profile_root))],
+                [str(profile_root / "strict-test" / "home")],
+            )
+            for _option, _perms, _key, target in sandbox._INJECTED_FILES:
+                self.assertIn(
+                    bwrap_args[bwrap_args.index(target) - 2],
+                    {"--file", "--ro-bind-data"},
+                )
+            self.assertGreater(
+                bwrap_args.index("--remount-ro"), bwrap_args.index("/etc/resolv.conf")
+            )
+            passwd = (profile_root / "strict-test" / "passwd").read_text()
+            self.assertNotIn("Fingerprint", passwd)
+            fstab = (profile_root / "strict-test" / "fstab").read_text()
+            self.assertNotIn("fingerprint", fstab)
+
+    def test_injected_descriptors_reach_the_final_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sources = []
+            for index in range(len(sandbox._INJECTED_FILES)):
+                path = Path(tmp) / f"source-{index}"
+                path.write_text(f"{index};", encoding="utf-8")
+                sources.append(str(path))
+            first = sandbox._FIRST_INJECTED_FD
+            reader = (
+                "import os, sys; sys.stdout.write(''.join("
+                f"os.read(fd, 64).decode() for fd in range({first}, {first + len(sources)})))"
+            )
+            command = sandbox._with_injected_descriptors(
+                [sys.executable, "-c", reader], sources
+            )
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+        self.assertEqual(
+            result.stdout, "".join(f"{index};" for index in range(len(sources)))
+        )
 
     def test_machine_id_is_stable_per_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

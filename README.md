@@ -80,7 +80,11 @@ After `./install.sh`, the same commands can be run from anywhere without the
 transparent network namespace through the same local mixed proxy used by the
 reference ChatGPT desktop: `127.0.0.1:7898`.  It uses a persistent private
 profile HOME mounted at `/home/<sandbox-user>`, a profile-specific machine-id, private `/run`, `/tmp`, `/proc`,
-`/dev`, an empty `/sys`, a small private `/etc`, and a scrubbed environment.
+`/dev`, an empty `/sys`, a small private read-only `/etc`, and a scrubbed environment.
+The shell receives no `FT_*` variables, and the generated `/etc` identity files
+are copied in rather than bind-mounted, so the sandbox's mount table does not
+name the profile storage for them.  The persistent HOME is still a bind mount,
+so its host-side storage path remains visible in `/proc/self/mountinfo`.
 The host's real home directory is not present: the sandbox home pathname is backed by the
 profile's private HOME.  The default example exposes only the host `~/code`,
 mounted explicitly under the sandbox home (for example `~/code`); add more `sandbox.shares` entries only

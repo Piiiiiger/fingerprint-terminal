@@ -7,6 +7,7 @@ Bubblewrap then replaces the filesystem/process view seen by the actual shell.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import secrets
@@ -19,6 +20,26 @@ from typing import Any, Mapping, Sequence
 PROFILE_DATA_ROOT = Path.home() / ".local" / "share" / "fingerprint-terminal" / "profiles"
 _USERNAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 _MACHINE_ID_RE = re.compile(r"[0-9a-f]{32}")
+
+# Identity files are copied into the sandbox's private /etc tmpfs from inherited
+# descriptors rather than bind-mounted, so /proc/self/mountinfo inside the
+# sandbox does not list their host-side source paths.  /etc is remounted
+# read-only once populated.  procfs cannot hold new files, so boot_id is the one
+# remaining bind; --ro-bind-data still keeps its host path out of mountinfo.
+_FIRST_INJECTED_FD = 10
+_INJECTED_FILES = (
+    ("--file", "0444", "machine_id", "/etc/machine-id"),
+    ("--file", "0644", "passwd", "/etc/passwd"),
+    ("--file", "0644", "group", "/etc/group"),
+    ("--file", "0644", "locale_conf", "/etc/locale.conf"),
+    ("--file", "0644", "environment", "/etc/environment"),
+    ("--file", "0644", "vconsole", "/etc/vconsole.conf"),
+    ("--file", "0644", "fstab", "/etc/fstab"),
+    ("--file", "0644", "hostname", "/etc/hostname"),
+    ("--file", "0644", "hosts", "/etc/hosts"),
+    ("--file", "0644", "resolv", "/etc/resolv.conf"),
+    ("--ro-bind-data", "0444", "boot_id", "/proc/sys/kernel/random/boot_id"),
+)
 
 
 class SandboxError(RuntimeError):
@@ -86,6 +107,14 @@ def _profile_root(profile: Mapping[str, Any]) -> Path:
 
 def _host_profile_home(profile: Mapping[str, Any]) -> Path:
     return _profile_root(profile) / "home"
+
+
+def _sandbox_hostname(profile: Mapping[str, Any], env: Mapping[str, str]) -> str:
+    configured = str(env.get("FT_HOSTNAME") or "")
+    if configured:
+        return configured
+    digest = hashlib.sha256(str(profile["id"]).encode("utf-8")).hexdigest()[:6]
+    return f"desktop-{digest}"
 
 
 def _write_if_missing(path: Path, text: str, mode: int = 0o644) -> None:
@@ -163,12 +192,12 @@ def _identity_files(
     home = sandbox_home(profile)
     timezone = str(env.get("TZ") or "UTC")
     locale = str(env.get("LC_ALL") or env.get("LANG") or "en_US.UTF-8")
-    hostname = str(env.get("FT_HOSTNAME") or f"desktop-{profile['id']}")
+    hostname = _sandbox_hostname(profile, env)
 
     passwd = root / "passwd"
     passwd.write_text(
         "root:x:0:0:root:/root:/usr/bin/bash\n"
-        f"{username}:x:1000:1000:Fingerprint User:{home}:{shell}\n"
+        f"{username}:x:1000:1000::{home}:{shell}\n"
         "nobody:x:65534:65534:Nobody:/:/usr/bin/nologin\n",
         encoding="utf-8",
     )
@@ -196,7 +225,10 @@ def _identity_files(
     vconsole.chmod(0o644)
 
     fstab = root / "fstab"
-    fstab.write_text("# private fingerprint sandbox\n", encoding="utf-8")
+    fstab.write_text(
+        "# Static information about the filesystems.\n# See fstab(5) for details.\n",
+        encoding="utf-8",
+    )
     fstab.chmod(0o644)
 
     hostname_file = root / "strict-hostname"
@@ -333,36 +365,15 @@ def _safe_environment(
         "LANG": str(env.get("LANG") or "en_US.UTF-8"),
         "LC_ALL": str(env.get("LC_ALL") or env.get("LANG") or "en_US.UTF-8"),
         "LANGUAGE": str(env.get("LANGUAGE") or "en_US"),
-        "HOSTNAME": str(env.get("FT_HOSTNAME") or f"desktop-{profile['id']}"),
+        "HOSTNAME": _sandbox_hostname(profile, env),
         "TERM": str(env.get("TERM") or "xterm-256color"),
         "COLORTERM": str(env.get("COLORTERM") or "truecolor"),
-        "FT_PROFILE_ID": str(profile["id"]),
-        "FT_PROFILE_NAME": str(profile.get("name", profile["id"])),
-        "FT_SANDBOX_MODE": "strict",
-        "FT_NETWORK_MODE": "transparent",
     }
 
     wayland = _wayland_clipboard_socket(profile, env)
     if wayland is not None:
         _source, display = wayland
         safe["WAYLAND_DISPLAY"] = display
-
-    for key in (
-        "FT_TIMEZONE",
-        "FT_LOCALE",
-        "FT_EXIT_IP",
-        "FT_COUNTRY_CODE",
-        "FT_GEO_CITY",
-        "FT_GEO_REGION",
-        "FT_GEO_POSTAL",
-        "FT_GEO_LATITUDE",
-        "FT_GEO_LONGITUDE",
-        "FT_ASN",
-        "FT_ORGANIZATION",
-        "FT_CLOUDFLARE_COLO",
-    ):
-        if env.get(key):
-            safe[key] = str(env[key])
 
     reserved = {
         "HOME",
@@ -413,7 +424,7 @@ def strict_command(
     files = _identity_files(profile, env, shell)
     username = sandbox_username(profile)
     home = sandbox_home(profile)
-    hostname = str(env.get("FT_HOSTNAME") or f"desktop-{profile['id']}")
+    hostname = _sandbox_hostname(profile, env)
     wayland = _wayland_clipboard_socket(profile, env)
     safe_env = _safe_environment(profile, env, shell)
 
@@ -431,7 +442,7 @@ def strict_command(
         "--ro-bind",
         "/usr",
         "/usr",
-        "--dir",
+        "--tmpfs",
         "/etc",
         "--symlink",
         "usr/bin",
@@ -479,43 +490,17 @@ def strict_command(
         "--bind",
         str(host_home),
         home,
-        "--ro-bind",
-        str(files["machine_id"]),
-        "/etc/machine-id",
-        "--ro-bind",
-        str(files["passwd"]),
-        "/etc/passwd",
-        "--ro-bind",
-        str(files["group"]),
-        "/etc/group",
-        "--ro-bind",
-        str(files["locale_conf"]),
-        "/etc/locale.conf",
-        "--ro-bind",
-        str(files["environment"]),
-        "/etc/environment",
-        "--ro-bind",
-        str(files["vconsole"]),
-        "/etc/vconsole.conf",
-        "--ro-bind",
-        str(files["fstab"]),
-        "/etc/fstab",
-        "--ro-bind",
-        str(files["hostname"]),
-        "/etc/hostname",
-        "--ro-bind",
-        str(files["hosts"]),
-        "/etc/hosts",
-        "--ro-bind",
-        str(files["resolv"]),
-        "/etc/resolv.conf",
-        "--ro-bind",
-        str(files["zoneinfo"]),
+        "--symlink",
+        "../" + str(files["zoneinfo"]).lstrip("/"),
         "/etc/localtime",
-        "--ro-bind",
-        str(files["boot_id"]),
-        "/proc/sys/kernel/random/boot_id",
     ]
+
+    injected: list[str] = []
+    for fd, (option, perms, key, target) in enumerate(
+        _INJECTED_FILES, start=_FIRST_INJECTED_FD
+    ):
+        command.extend(["--perms", perms, option, str(fd), target])
+        injected.append(str(files[key]))
 
     if wayland is not None:
         source, display = wayland
@@ -528,6 +513,7 @@ def strict_command(
         )
 
     _append_safe_etc_bindings(command)
+    command.extend(["--remount-ro", "/etc"])
 
     # Re-expose only explicitly approved host directories under the private
     # profile HOME.  Everything else from /home is absent.
@@ -546,5 +532,23 @@ def strict_command(
         command.extend(["--setenv", key, value])
     command.extend(["--chdir", sandbox_cwd(profile)])
     command.extend(["--", *[str(part) for part in child]])
-    return command
+    return _with_injected_descriptors(command, injected)
+
+
+def _with_injected_descriptors(command: list[str], sources: Sequence[str]) -> list[str]:
+    """Open each injected source on its descriptor in the final exec of bwrap.
+
+    Opening them here rather than in the CLI keeps the descriptors away from the
+    network supervisor's other children.  bwrap closes each one after copying.
+    """
+
+    bash = shutil.which("bash") or "/usr/bin/bash"
+    redirects = " ".join(
+        f'{fd}<"${{{index}}}"'
+        for index, fd in enumerate(
+            range(_FIRST_INJECTED_FD, _FIRST_INJECTED_FD + len(sources)), start=1
+        )
+    )
+    script = f'exec "${{@:{len(sources) + 1}}}" {redirects}'
+    return [bash, "-c", script, "bwrap", *sources, *command]
 
