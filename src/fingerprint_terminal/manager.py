@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from .cli import launch_command
+from .network import STATE_ROOT
 from .profiles import ProfileError, load_store, validate_document
 from .sandbox import SandboxError, is_strict
 
@@ -20,16 +24,168 @@ from .sandbox import SandboxError, is_strict
 APP_ID = "io.fingerprintterminal.FingerprintTerminal"
 DEFAULT_PROFILE_ID = "strict-auto-ip"
 PROFILE_DATA_ROOT = Path.home() / ".local" / "share" / "fingerprint-terminal" / "profiles"
+LAUNCH_SHORTCUT = ("Mod", "Shift", "T")
+
+# Colors come from the active theme's accent so custom themes carry through.
+_CSS = """
+.ft-hero {
+  padding: 22px 24px 24px;
+  border-radius: 24px;
+  background-image: linear-gradient(135deg,
+      color-mix(in srgb, var(--accent-bg-color) 72%, white) 0%,
+      var(--accent-bg-color) 55%,
+      color-mix(in srgb, var(--accent-bg-color) 82%, black) 100%);
+  color: var(--accent-fg-color);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--accent-bg-color) 30%, transparent),
+              0 1px 3px alpha(black, 0.15);
+}
+
+.ft-hero-icon {
+  min-width: 40px;
+  min-height: 40px;
+  border-radius: 12px;
+  background-color: alpha(white, 0.18);
+}
+
+.ft-keycap {
+  min-width: 14px;
+  padding: 2px 7px 3px;
+  border-radius: 6px;
+  background-color: alpha(white, 0.16);
+  box-shadow: inset 0 -2px alpha(black, 0.15);
+  font-size: 0.8em;
+  font-weight: 600;
+}
+
+.ft-country {
+  min-width: 68px;
+  min-height: 68px;
+  border-radius: 20px;
+  background-color: alpha(white, 0.16);
+  font-size: 1.6em;
+  font-weight: 800;
+  letter-spacing: 1px;
+}
+
+.ft-place {
+  font-size: 1.8em;
+  font-weight: 800;
+}
+
+.ft-exit-meta {
+  font-feature-settings: "tnum";
+}
+
+button.ft-launch {
+  padding: 8px 22px;
+  background-color: alpha(white, 0.92);
+  color: var(--accent-bg-color);
+  font-weight: 700;
+  box-shadow: 0 2px 6px alpha(black, 0.15);
+}
+
+button.ft-launch:hover {
+  background-color: white;
+}
+
+button.ft-launch:active {
+  background-color: alpha(white, 0.8);
+}
+
+.ft-tile-icon {
+  color: var(--accent-color);
+}
+
+.ft-folder {
+  padding: 16px;
+}
+
+flowbox.ft-grid > flowboxchild {
+  padding: 0;
+}
+
+button.ft-link-tile {
+  padding: 14px 16px;
+}
+
+.ft-empty {
+  padding: 24px;
+}
+"""
+_css_installed = False
+
+
+def _install_css() -> None:
+    global _css_installed
+    display = Gdk.Display.get_default()
+    if _css_installed or display is None:
+        return
+    provider = Gtk.CssProvider()
+    provider.load_from_string(_CSS)
+    Gtk.StyleContext.add_provider_for_display(
+        display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
+    _css_installed = True
+
+
+def _tilde(path: str | Path) -> str:
+    """Abbreviate the host HOME to ``~`` for display."""
+
+    text = str(Path(os.path.expandvars(str(path))).expanduser())
+    home = str(Path.home())
+    if text == home:
+        return "~"
+    if text.startswith(home + "/"):
+        return "~" + text[len(home):]
+    return text
+
+
+def _last_exit(profile_id: str) -> tuple[dict, float] | None:
+    """Return the identity recorded by the profile's latest launch and its age."""
+
+    path = STATE_ROOT / profile_id / "identity.json"
+    try:
+        identity = json.loads(path.read_text(encoding="utf-8"))
+        age = time.time() - path.stat().st_mtime
+    except (OSError, ValueError):
+        return None
+    if not isinstance(identity, dict) or not identity.get("ip"):
+        return None
+    return identity, age
+
+
+def _relative_time(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return "刚刚"
+    if minutes < 60:
+        return f"{minutes} 分钟前"
+    if minutes < 24 * 60:
+        return f"{minutes // 60} 小时前"
+    return f"{minutes // (24 * 60)} 天前"
+
+
+def _label(
+    text: str = "",
+    *css_classes: str,
+    xalign: float = 0,
+    ellipsize: Pango.EllipsizeMode = Pango.EllipsizeMode.NONE,
+) -> Gtk.Label:
+    label = Gtk.Label(label=text, xalign=xalign, ellipsize=ellipsize)
+    for name in css_classes:
+        label.add_css_class(name)
+    return label
 
 
 class ManagerWindow(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application) -> None:
         super().__init__(application=application, title="指纹终端设置")
-        self.set_default_size(780, 760)
+        self.set_default_size(820, 860)
         self.set_size_request(620, 560)
         self.store = load_store()
         self.profile = self._load_default_profile()
         self._share_chooser: Gtk.FileChooserNative | None = None
+        _install_css()
 
         self.toast_overlay = Adw.ToastOverlay()
         self.set_content(self.toast_overlay)
@@ -38,7 +194,8 @@ class ManagerWindow(Adw.ApplicationWindow):
         self.toast_overlay.set_child(toolbar)
 
         header = Adw.HeaderBar()
-        header.set_title_widget(Gtk.Label(label="指纹终端设置"))
+        # The hero card names the window; the WM still gets the title.
+        header.set_show_title(False)
         toolbar.add_top_bar(header)
 
         menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic")
@@ -48,11 +205,6 @@ class ManagerWindow(Adw.ApplicationWindow):
         menu.append("重新载入", "app.reload")
         menu_button.set_menu_model(menu)
         header.pack_end(menu_button)
-
-        launch_button = Gtk.Button(label="打开终端")
-        launch_button.add_css_class("suggested-action")
-        launch_button.connect("clicked", self._launch)
-        header.pack_end(launch_button)
 
         conversations_button = Gtk.Button(label="AI 对话")
         conversations_button.set_tooltip_text("管理 Claude Code 和 Codex 对话记录")
@@ -64,118 +216,142 @@ class ManagerWindow(Adw.ApplicationWindow):
         toolbar.set_content(scroller)
 
         clamp = Adw.Clamp()
-        clamp.set_maximum_size(720)
+        clamp.set_maximum_size(760)
         clamp.set_tightening_threshold(620)
         scroller.set_child(clamp)
 
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
-        page.set_margin_top(30)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=30)
+        page.set_margin_top(12)
         page.set_margin_bottom(36)
         page.set_margin_start(24)
         page.set_margin_end(24)
         clamp.set_child(page)
 
-        hero = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
-        hero.set_margin_bottom(4)
-        page.append(hero)
-
-        hero_icon = Gtk.Image.new_from_icon_name("utilities-terminal-symbolic")
-        hero_icon.set_pixel_size(52)
-        hero_icon.add_css_class("accent")
-        hero.append(hero_icon)
-
-        hero_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        hero_text.set_valign(Gtk.Align.CENTER)
-        hero_text.set_hexpand(True)
-        hero.append(hero_text)
-
-        title = Gtk.Label(label="指纹终端", xalign=0)
-        title.add_css_class("title-1")
-        hero_text.append(title)
-        subtitle = Gtk.Label(
-            label="透明网络 · Strict 隔离 · 私有 Home",
-            xalign=0,
-        )
-        subtitle.add_css_class("dim-label")
-        hero_text.append(subtitle)
-
-        shortcut = Gtk.Label(label="Mod + Shift + T")
-        shortcut.add_css_class("caption")
-        shortcut.add_css_class("dim-label")
-        shortcut.set_valign(Gtk.Align.CENTER)
-        hero.append(shortcut)
-
-        self.identity_group = Adw.PreferencesGroup(
-            title="环境",
-            description="终端内部看到的身份与网络环境。",
-        )
-        page.append(self.identity_group)
-
-        self.network_row = Adw.ActionRow(title="网络")
-        self.network_row.set_icon_name("network-vpn-symbolic")
-        self.identity_group.add(self.network_row)
-
-        self.home_row = Adw.ActionRow(title="私有 Home")
-        self.home_row.set_icon_name("user-home-symbolic")
-        self.identity_group.add(self.home_row)
-
-        self.hostname_row = Adw.ActionRow(title="主机名")
-        self.hostname_row.set_icon_name("computer-symbolic")
-        self.identity_group.add(self.hostname_row)
+        page.append(self._build_hero())
 
         self.shares_group = Adw.PreferencesGroup(
             title="共享目录",
             description="只有这里列出的宿主目录会出现在指纹终端里。",
         )
-        self.share_rows: list[Adw.ActionRow] = []
+        add_share = Gtk.Button(
+            child=Adw.ButtonContent(icon_name="list-add-symbolic", label="添加目录")
+        )
+        add_share.add_css_class("flat")
+        add_share.set_valign(Gtk.Align.CENTER)
+        add_share.connect("clicked", self._add_share)
+        self.shares_group.set_header_suffix(add_share)
+
+        self.share_grid = Gtk.FlowBox(
+            homogeneous=True,
+            selection_mode=Gtk.SelectionMode.NONE,
+            min_children_per_line=1,
+            max_children_per_line=3,
+            column_spacing=12,
+            row_spacing=12,
+        )
+        self.share_grid.add_css_class("ft-grid")
+        self.shares_group.add(self.share_grid)
+        self.shares_empty = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.shares_empty.add_css_class("card")
+        self.shares_empty.add_css_class("ft-empty")
+        self.shares_empty.append(_label("还没有共享目录", "heading", xalign=0.5))
+        self.shares_empty.append(
+            _label("点击右上角的“添加目录”选择一个宿主文件夹。", "caption", "dim-label", xalign=0.5)
+        )
+        self.shares_group.add(self.shares_empty)
         page.append(self.shares_group)
 
-        share_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        share_actions.set_halign(Gtk.Align.START)
-        page.append(share_actions)
-
-        add_share = Gtk.Button(label="添加目录")
-        add_share.set_icon_name("folder-new-symbolic")
-        add_share.add_css_class("suggested-action")
-        add_share.add_css_class("pill")
-        add_share.connect("clicked", self._add_share)
-        share_actions.append(add_share)
-
-        open_home = Gtk.Button(label="打开私有 Home")
-        open_home.set_icon_name("folder-open-symbolic")
-        open_home.add_css_class("pill")
-        open_home.connect("clicked", self._open_private_home)
-        share_actions.append(open_home)
-
         self.storage_group = Adw.PreferencesGroup(title="存储")
+        links = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12, homogeneous=True)
+        links.append(
+            self._link_tile(
+                "Profile 数据",
+                _tilde(self._private_home_path()),
+                "drive-harddisk-symbolic",
+                lambda _button: self._open_private_home(None),
+            )
+        )
+        links.append(
+            self._link_tile(
+                "高级配置",
+                self.store.path.name,
+                "document-properties-symbolic",
+                lambda _button: self._open_config(None),
+            )
+        )
+        self.storage_group.add(links)
         page.append(self.storage_group)
 
-        private_home_row = Adw.ActionRow(
-            title="Profile 数据",
-            subtitle=str(self._private_home_path()),
-        )
-        private_home_row.set_icon_name("drive-harddisk-symbolic")
-        open_button = Gtk.Button(label="打开")
-        open_button.set_valign(Gtk.Align.CENTER)
-        open_button.add_css_class("flat")
-        open_button.connect("clicked", self._open_private_home)
-        private_home_row.add_suffix(open_button)
-        self.storage_group.add(private_home_row)
-
-        config_row = Adw.ActionRow(
-            title="高级配置",
-            subtitle="profiles.json",
-        )
-        config_row.set_icon_name("document-properties-symbolic")
-        config_button = Gtk.Button(label="打开")
-        config_button.set_valign(Gtk.Align.CENTER)
-        config_button.add_css_class("flat")
-        config_button.connect("clicked", self._open_config)
-        config_row.add_suffix(config_button)
-        self.storage_group.add(config_row)
-
+        self.connect("notify::is-active", self._on_active_changed)
         self._register_actions()
         self._refresh()
+
+    def _build_hero(self) -> Gtk.Widget:
+        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=22)
+        hero.add_css_class("ft-hero")
+
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        icon = Gtk.Image.new_from_icon_name("utilities-terminal-symbolic")
+        icon.set_pixel_size(22)
+        icon.add_css_class("ft-hero-icon")
+        top.append(icon)
+        title = _label("指纹终端", "title-3")
+        title.set_hexpand(True)
+        top.append(title)
+        keys = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        keys.set_valign(Gtk.Align.CENTER)
+        keys.set_tooltip_text("快捷启动")
+        for key in LAUNCH_SHORTCUT:
+            keys.append(_label(key, "ft-keycap", xalign=0.5))
+        top.append(keys)
+        hero.append(top)
+
+        self.exit_row = exit_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
+        self.country_badge = _label("", "ft-country", xalign=0.5)
+        self.country_badge.set_valign(Gtk.Align.CENTER)
+        exit_row.append(self.country_badge)
+        exit_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        exit_text.set_valign(Gtk.Align.CENTER)
+        exit_text.set_hexpand(True)
+        self.exit_place = _label("", "ft-place", ellipsize=Pango.EllipsizeMode.END)
+        self.exit_meta = _label("", "ft-exit-meta")
+        self.exit_meta.set_wrap(True)
+        self.exit_meta.set_selectable(True)
+        exit_text.append(self.exit_place)
+        exit_text.append(self.exit_meta)
+        exit_row.append(exit_text)
+        hero.append(exit_row)
+
+        launch = Gtk.Button(
+            child=Adw.ButtonContent(
+                icon_name="media-playback-start-symbolic", label="打开终端"
+            )
+        )
+        launch.add_css_class("pill")
+        launch.add_css_class("ft-launch")
+        launch.set_halign(Gtk.Align.START)
+        launch.connect("clicked", self._launch)
+        hero.append(launch)
+        return hero
+
+    def _link_tile(self, title: str, subtitle: str, icon_name: str, callback) -> Gtk.Button:
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        icon = Gtk.Image.new_from_icon_name(icon_name)
+        icon.add_css_class("ft-tile-icon")
+        content.append(icon)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        text.set_hexpand(True)
+        text.append(_label(title, "heading"))
+        text.append(_label(subtitle, "caption", "dim-label", ellipsize=Pango.EllipsizeMode.MIDDLE))
+        content.append(text)
+        content.append(Gtk.Image.new_from_icon_name("adw-external-link-symbolic"))
+
+        button = Gtk.Button(child=content)
+        button.add_css_class("card")
+        button.add_css_class("ft-link-tile")
+        button.set_tooltip_text(subtitle)
+        button.connect("clicked", callback)
+        return button
 
     def _load_default_profile(self) -> dict:
         try:
@@ -209,70 +385,92 @@ class ManagerWindow(Adw.ApplicationWindow):
         self.toast_overlay.add_toast(Adw.Toast.new(message))
 
     def _refresh(self) -> None:
-        network = self.profile.get("network", {})
-        identity = self.profile.get("identity", {})
-        username = str(self.profile.get("sandbox", {}).get("username", "dev") or "dev")
-        if network.get("mode") == "transparent":
-            network_subtitle = "透明代理 · 自动跟随出口 IP"
-            bypasses = network.get("direct_bypass", []) or []
-            if bypasses:
-                names = [str(rule.get("name") or rule.get("destination")) for rule in bypasses]
-                network_subtitle += " · 直连：" + "、".join(names)
-        else:
-            network_subtitle = "未启用透明网络"
-        if self.profile.get("sandbox", {}).get("clipboard") == "wayland":
-            network_subtitle += " · 宿主剪贴板"
-        self.network_row.set_subtitle(network_subtitle)
-        self.home_row.set_subtitle(f"/home/{username} · 与宿主 Home 隔离")
-        self.hostname_row.set_subtitle(str(identity.get("hostname", "auto")))
+        self._refresh_exit()
         self._refresh_shares()
 
-    def _clear_share_rows(self) -> None:
-        for row in self.share_rows:
-            self.shares_group.remove(row)
-        self.share_rows.clear()
+    def _refresh_exit(self) -> None:
+        recorded = _last_exit(str(self.profile["id"]))
+        if recorded is None:
+            self.country_badge.set_label("?")
+            self.exit_place.set_label("还没有出口记录")
+            self.exit_meta.set_label("打开一次终端后，这里会显示出口 IP 和时区。")
+            self.exit_row.set_tooltip_text(None)
+            return
+        identity, age = recorded
+        code = str(identity.get("country_code") or "?").upper()
+        place = ", ".join(
+            str(part) for part in (identity.get("city"), identity.get("country")) if part
+        )
+        self.country_badge.set_label(code)
+        self.exit_place.set_label(place or code)
+        self.exit_meta.set_label(
+            " · ".join(
+                str(part) for part in (identity.get("ip"), identity.get("timezone")) if part
+            )
+        )
+        self.exit_row.set_tooltip_text(f"记录于 {_relative_time(age)}，每次打开终端时更新")
+
+    def _on_active_changed(self, _window: Gtk.Window, _pspec: object) -> None:
+        # Each launch rewrites identity.json after its exit preflight; pick the
+        # new exit up whenever the user returns to this window.
+        if self.is_active():
+            self._refresh_exit()
 
     def _refresh_shares(self) -> None:
-        self._clear_share_rows()
+        self.share_grid.remove_all()
         shares = self.profile.get("sandbox", {}).get("shares", []) or []
         username = str(self.profile.get("sandbox", {}).get("username", "dev") or "dev")
-        sandbox_home = f"/home/{username}"
-
-        if not shares:
-            empty = Adw.ActionRow(
-                title="还没有共享目录",
-                subtitle="点击下面的“添加目录”选择一个宿主文件夹。",
-            )
-            empty.set_icon_name("folder-symbolic")
-            self.shares_group.add(empty)
-            self.share_rows.append(empty)
-            return
-
+        self.shares_empty.set_visible(not shares)
+        self.share_grid.set_visible(bool(shares))
         for index, share in enumerate(shares):
-            source = str(share.get("source", ""))
-            target = str(share.get("target", ""))
-            mode = str(share.get("mode", "rw"))
-            row = Adw.ActionRow(
-                title=f"{sandbox_home}/{target}",
-                subtitle=f"宿主：{source}",
-            )
-            row.set_icon_name("folder-symbolic")
+            card = self._share_card(index, share, f"/home/{username}")
+            self.share_grid.append(card)
+            # Focus belongs to the card's own controls, not the grid cell.
+            card.get_parent().set_focusable(False)
 
-            mode_button = Gtk.Button(label="读写" if mode == "rw" else "只读")
-            mode_button.set_valign(Gtk.Align.CENTER)
-            mode_button.add_css_class("flat")
-            mode_button.set_tooltip_text("切换读写权限")
-            mode_button.connect("clicked", self._toggle_share_mode, index)
-            row.add_suffix(mode_button)
+    def _share_card(self, index: int, share: dict, sandbox_home: str) -> Gtk.Widget:
+        source = str(share.get("source", ""))
+        target = str(share.get("target", ""))
+        mode = str(share.get("mode", "rw"))
 
-            remove = Gtk.Button.new_from_icon_name("user-trash-symbolic")
-            remove.set_valign(Gtk.Align.CENTER)
-            remove.add_css_class("flat")
-            remove.set_tooltip_text("移除共享目录")
-            remove.connect("clicked", self._remove_share, index)
-            row.add_suffix(remove)
-            self.shares_group.add(row)
-            self.share_rows.append(row)
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        card.add_css_class("card")
+        card.add_css_class("ft-folder")
+        card.set_tooltip_text(f"终端内路径 {sandbox_home}/{target}")
+        icon = Gtk.Image.new_from_icon_name("folder-symbolic")
+        icon.set_pixel_size(32)
+        icon.add_css_class("ft-tile-icon")
+        icon.set_halign(Gtk.Align.START)
+        icon.set_margin_bottom(10)
+        card.append(icon)
+        name = _label(f"~/{target}", "heading", ellipsize=Pango.EllipsizeMode.END)
+        host = _label(
+            f"宿主 {_tilde(source)}", "caption", "dim-label", ellipsize=Pango.EllipsizeMode.MIDDLE
+        )
+        for label in (name, host):
+            # Long paths ellipsize instead of widening every grid cell.
+            label.set_max_width_chars(1)
+            card.append(label)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        actions.set_margin_top(14)
+        mode_group = Adw.ToggleGroup()
+        mode_group.add(Adw.Toggle(name="rw", label="读写"))
+        mode_group.add(Adw.Toggle(name="ro", label="只读"))
+        mode_group.set_active_name("ro" if mode == "ro" else "rw")
+        mode_group.set_tooltip_text("终端内的访问权限")
+        mode_group.connect("notify::active-name", self._share_mode_changed, index)
+        actions.append(mode_group)
+        remove = Gtk.Button.new_from_icon_name("user-trash-symbolic")
+        remove.add_css_class("flat")
+        remove.add_css_class("circular")
+        remove.set_hexpand(True)
+        remove.set_halign(Gtk.Align.END)
+        remove.set_tooltip_text("移除共享目录")
+        remove.connect("clicked", self._remove_share, index)
+        actions.append(remove)
+        card.append(actions)
+        return card
 
     def _save_profile(self, profile: dict) -> None:
         profiles = self.store.document.get("profiles", [])
@@ -365,12 +563,19 @@ class ManagerWindow(Adw.ApplicationWindow):
         except ProfileError as exc:
             self._toast(f"保存失败：{exc}")
 
-    def _toggle_share_mode(self, _button: Gtk.Button, index: int) -> None:
+    def _share_mode_changed(
+        self, group: Adw.ToggleGroup, _pspec: object, index: int
+    ) -> None:
+        # Saving rebuilds the rows, so let the toggle finish handling its click
+        # before its widget is replaced.
+        GLib.idle_add(self._set_share_mode, index, group.get_active_name())
+
+    def _set_share_mode(self, index: int, mode: str) -> bool:
         shares = list(self.profile.get("sandbox", {}).get("shares", []) or [])
-        if not 0 <= index < len(shares):
-            return
+        if not 0 <= index < len(shares) or shares[index].get("mode", "rw") == mode:
+            return GLib.SOURCE_REMOVE
         item = dict(shares[index])
-        item["mode"] = "ro" if item.get("mode", "rw") == "rw" else "rw"
+        item["mode"] = mode
         shares[index] = item
         updated = dict(self.profile)
         sandbox = dict(updated.get("sandbox", {}))
@@ -381,6 +586,7 @@ class ManagerWindow(Adw.ApplicationWindow):
             self._toast("共享权限已更新")
         except ProfileError as exc:
             self._toast(f"保存失败：{exc}")
+        return GLib.SOURCE_REMOVE
 
     def _remove_share(self, _button: Gtk.Button, index: int) -> None:
         shares = list(self.profile.get("sandbox", {}).get("shares", []) or [])
