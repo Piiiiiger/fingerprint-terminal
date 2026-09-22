@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import gi
 
@@ -25,6 +25,10 @@ APP_ID = "io.fingerprintterminal.FingerprintTerminal"
 DEFAULT_PROFILE_ID = "strict-auto-ip"
 PROFILE_DATA_ROOT = Path.home() / ".local" / "share" / "fingerprint-terminal" / "profiles"
 LAUNCH_SHORTCUT = ("Mod", "Shift", "T")
+# Reloading is local file work that finishes in milliseconds; keep the busy
+# state up long enough to be seen, then briefly confirm before resetting.
+_REFRESH_MIN_BUSY_MS = 600
+_REFRESH_DONE_MS = 1200
 
 # Colors come from the active theme's accent so custom themes carry through.
 _CSS = """
@@ -165,6 +169,61 @@ def _relative_time(seconds: float) -> str:
     return f"{minutes // (24 * 60)} 天前"
 
 
+def _share_targets(profile: dict) -> set[str]:
+    """Return safe relative mount targets declared by *profile*."""
+
+    targets: set[str] = set()
+    for share in profile.get("sandbox", {}).get("shares", []) or []:
+        target = str(share.get("target", "") or "").strip()
+        relative = PurePosixPath(target)
+        if target and not relative.is_absolute() and ".." not in relative.parts:
+            targets.add(relative.as_posix())
+    return targets
+
+
+def _cleanup_empty_share_targets(private_home: Path, targets: set[str]) -> int:
+    """Remove known empty mountpoint directories below the private HOME."""
+
+    removed = 0
+    ordered = sorted(
+        targets,
+        key=lambda value: len(PurePosixPath(value).parts),
+        reverse=True,
+    )
+    for target in ordered:
+        relative = PurePosixPath(target)
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            continue
+        path = private_home.joinpath(*relative.parts)
+        try:
+            # rmdir deliberately leaves symlinks, files and non-empty folders
+            # untouched, so refreshing cannot remove user data.
+            path.rmdir()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
+def _ensure_share_targets(private_home: Path, targets: set[str]) -> int:
+    """Create configured mountpoint directories in the private HOME."""
+
+    created = 0
+    for target in sorted(targets):
+        relative = PurePosixPath(target)
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            continue
+        path = private_home.joinpath(*relative.parts)
+        if path.exists():
+            continue
+        try:
+            path.mkdir(parents=True, exist_ok=False)
+        except OSError:
+            continue
+        created += 1
+    return created
+
+
 def _label(
     text: str = "",
     *css_classes: str,
@@ -184,7 +243,11 @@ class ManagerWindow(Adw.ApplicationWindow):
         self.set_size_request(620, 560)
         self.store = load_store()
         self.profile = self._load_default_profile()
+        self._known_share_targets = _share_targets(self.profile)
+        _ensure_share_targets(self._private_home_path(), self._known_share_targets)
         self._share_chooser: Gtk.FileChooserNative | None = None
+        self._reload_pending = False
+        self._refresh_reset_source = 0
         _install_css()
 
         self.toast_overlay = Adw.ToastOverlay()
@@ -233,13 +296,37 @@ class ManagerWindow(Adw.ApplicationWindow):
             title="共享目录",
             description="只有这里列出的宿主目录会出现在指纹终端里。",
         )
+        share_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        # One stack page per state keeps the button width fixed while it changes.
+        self.refresh_stack = Gtk.Stack(
+            transition_type=Gtk.StackTransitionType.CROSSFADE,
+            transition_duration=150,
+        )
+        for name, indicator, text in (
+            ("idle", Gtk.Image.new_from_icon_name("view-refresh-symbolic"), "刷新"),
+            ("busy", Adw.Spinner(), "刷新中…"),
+            ("done", Gtk.Image.new_from_icon_name("object-select-symbolic"), "已刷新"),
+        ):
+            content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            content.set_halign(Gtk.Align.CENTER)
+            content.append(indicator)
+            content.append(Gtk.Label(label=text))
+            self.refresh_stack.add_named(content, name)
+        self.refresh_button = Gtk.Button(child=self.refresh_stack)
+        self.refresh_button.add_css_class("flat")
+        self.refresh_button.set_valign(Gtk.Align.CENTER)
+        self.refresh_button.set_tooltip_text("重新载入设置并同步共享目录挂载点")
+        self.refresh_button.connect("clicked", lambda _button: self._reload())
+        share_actions.append(self.refresh_button)
+
         add_share = Gtk.Button(
             child=Adw.ButtonContent(icon_name="list-add-symbolic", label="添加目录")
         )
         add_share.add_css_class("flat")
         add_share.set_valign(Gtk.Align.CENTER)
         add_share.connect("clicked", self._add_share)
-        self.shares_group.set_header_suffix(add_share)
+        share_actions.append(add_share)
+        self.shares_group.set_header_suffix(share_actions)
 
         self.share_grid = Gtk.FlowBox(
             homogeneous=True,
@@ -472,7 +559,8 @@ class ManagerWindow(Adw.ApplicationWindow):
         card.append(actions)
         return card
 
-    def _save_profile(self, profile: dict) -> None:
+    def _save_profile(self, profile: dict) -> int:
+        previous_targets = self._known_share_targets
         profiles = self.store.document.get("profiles", [])
         for index, existing in enumerate(profiles):
             if existing.get("id") == profile.get("id"):
@@ -483,7 +571,13 @@ class ManagerWindow(Adw.ApplicationWindow):
         validate_document(self.store.document)
         self.store.save()
         self.profile = profile
+        self._known_share_targets = _share_targets(profile)
+        cleaned = _cleanup_empty_share_targets(
+            self._private_home_path(), previous_targets - self._known_share_targets
+        )
+        _ensure_share_targets(self._private_home_path(), self._known_share_targets)
         self._refresh()
+        return cleaned
 
     def _add_share(self, _button: Gtk.Button) -> None:
         if self._share_chooser is not None:
@@ -598,8 +692,11 @@ class ManagerWindow(Adw.ApplicationWindow):
         sandbox["shares"] = shares
         updated["sandbox"] = sandbox
         try:
-            self._save_profile(updated)
-            self._toast(f"已移除 {Path(str(removed.get('source', '目录'))).name}")
+            cleaned = self._save_profile(updated)
+            suffix = "，空挂载目录已清理" if cleaned else ""
+            self._toast(
+                f"已移除 {Path(str(removed.get('source', '目录'))).name}{suffix}"
+            )
         except ProfileError as exc:
             self._toast(f"保存失败：{exc}")
 
@@ -715,13 +812,74 @@ class ManagerWindow(Adw.ApplicationWindow):
             self._toast(f"无法打开配置：{exc.message}")
 
     def _reload(self) -> None:
+        if self._reload_pending:
+            return
+        self._reload_pending = True
+        if self._refresh_reset_source:
+            GLib.source_remove(self._refresh_reset_source)
+            self._refresh_reset_source = 0
+        self._set_refresh_state("busy")
+        # Idle sources run after the next frame, so the spinner is drawn
+        # before the synchronous reload starts.
+        GLib.idle_add(self._run_reload, time.monotonic())
+
+    def _run_reload(self, started: float) -> bool:
+        succeeded, message = self._reload_settings()
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        GLib.timeout_add(
+            max(0, _REFRESH_MIN_BUSY_MS - elapsed_ms),
+            self._finish_reload,
+            succeeded,
+            message,
+        )
+        return GLib.SOURCE_REMOVE
+
+    def _finish_reload(self, succeeded: bool, message: str) -> bool:
+        self._reload_pending = False
+        self._toast(message)
+        if succeeded:
+            self._set_refresh_state("done")
+            self._refresh_reset_source = GLib.timeout_add(
+                _REFRESH_DONE_MS, self._reset_refresh_button
+            )
+        else:
+            self._set_refresh_state("idle")
+        return GLib.SOURCE_REMOVE
+
+    def _reset_refresh_button(self) -> bool:
+        self._refresh_reset_source = 0
+        self._set_refresh_state("idle")
+        return GLib.SOURCE_REMOVE
+
+    def _set_refresh_state(self, state: str) -> None:
+        self.refresh_stack.set_visible_child_name(state)
+        # Ignore clicks while busy without dimming the spinner the way an
+        # insensitive button would.
+        self.refresh_button.set_can_target(state != "busy")
+
+    def _reload_settings(self) -> tuple[bool, str]:
+        """Reload the profile and sync share mountpoints; return (ok, message)."""
+
         try:
+            previous_targets = self._known_share_targets
             self.store = load_store()
             self.profile = self._load_default_profile()
+            self._known_share_targets = _share_targets(self.profile)
+            cleaned = _cleanup_empty_share_targets(
+                self._private_home_path(), previous_targets - self._known_share_targets
+            )
+            created = _ensure_share_targets(
+                self._private_home_path(), self._known_share_targets
+            )
             self._refresh()
-            self._toast("设置已重新载入")
+            if cleaned or created:
+                return True, (
+                    f"设置已刷新：新建 {created} 个、清理 {cleaned} 个挂载点；"
+                    "共享变更将在新终端生效"
+                )
+            return True, "设置已刷新；共享变更将在新终端生效"
         except ProfileError as exc:
-            self._toast(f"重新载入失败：{exc}")
+            return False, f"重新载入失败：{exc}"
 
 
 class FingerprintTerminalApplication(Adw.Application):

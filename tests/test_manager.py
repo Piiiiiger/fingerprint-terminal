@@ -50,6 +50,52 @@ class ManagerHelperTests(unittest.TestCase):
         self.assertEqual(manager._tilde("~/Downloads"), "~/Downloads")
         self.assertEqual(manager._tilde(f"{home}-other/x"), f"{home}-other/x")
 
+    def test_share_targets_returns_only_safe_relative_paths(self) -> None:
+        profile = {
+            "sandbox": {
+                "shares": [
+                    {"target": "code"},
+                    {"target": "projects/demo"},
+                    {"target": "../escape"},
+                    {"target": "/absolute"},
+                ]
+            }
+        }
+        self.assertEqual(manager._share_targets(profile), {"code", "projects/demo"})
+
+    def test_cleanup_removes_only_known_empty_mountpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            private_home = Path(tmp)
+            empty = private_home / "empty"
+            nonempty = private_home / "nonempty"
+            unrelated = private_home / "unrelated"
+            empty.mkdir()
+            nonempty.mkdir()
+            unrelated.mkdir()
+            (nonempty / "keep.txt").write_text("keep", encoding="utf-8")
+
+            removed = manager._cleanup_empty_share_targets(
+                private_home, {"empty", "nonempty"}
+            )
+
+            self.assertEqual(removed, 1)
+            self.assertFalse(empty.exists())
+            self.assertTrue(nonempty.is_dir())
+            self.assertTrue(unrelated.is_dir())
+
+    def test_ensure_creates_only_configured_mountpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            private_home = Path(tmp)
+
+            created = manager._ensure_share_targets(
+                private_home, {"code", "projects/demo", "../escape"}
+            )
+
+            self.assertEqual(created, 2)
+            self.assertTrue((private_home / "code").is_dir())
+            self.assertTrue((private_home / "projects" / "demo").is_dir())
+            self.assertFalse((private_home.parent / "escape").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
