@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from . import __version__
 from .conversations import ConversationError, ConversationManager
@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     clone.add_argument("--name")
 
     identity = sub.add_parser("identity", help="resolve the real proxy exit and its IP-derived identity")
-    identity.add_argument("profile", nargs="?", default="auto-ip")
+    identity.add_argument("profile", nargs="?", default="strict-auto-ip")
 
     sub.add_parser("config", help="print the active profile config path")
     sub.add_parser("doctor", help="check native terminal/profile prerequisites")
@@ -283,14 +283,25 @@ def cmd_clone(source: str, new_id: str, name: str | None) -> int:
     return 0
 
 
+def profile_dependencies(profile: Mapping[str, Any]) -> list[str]:
+    """Host binaries that *profile* cannot start without."""
+
+    required: list[str] = []
+    if is_transparent(profile):
+        required.extend(TRANSPARENT_DEPENDENCIES)
+    if is_strict(profile):
+        required.append("bwrap")
+    return required
+
+
 def cmd_doctor() -> int:
     store = load_store()
     print(f"Fingerprint Terminal {__version__}")
     print(f"Profiles: {store.path}")
     print(f"Host SHELL: {os.environ.get('SHELL') or '(unset)'}")
     failures = 0
-    doctor_binaries = ("kitty", "konsole", "bwrap", "sing-box") + TRANSPARENT_DEPENDENCIES
-    for binary in doctor_binaries:
+    # Informational only: which binaries matter depends on each profile below.
+    for binary in ("kitty", "konsole", "bwrap", *TRANSPARENT_DEPENDENCIES):
         found = shutil.which(binary)
         print(f"{binary:9}: {found or 'not found'}")
     for profile in store.profiles:
@@ -298,6 +309,9 @@ def cmd_doctor() -> int:
             shell = resolved_shell(profile)
             cwd = resolved_cwd(profile)
             terminal_command(profile, ["true"])
+            missing = [name for name in profile_dependencies(profile) if not shutil.which(name)]
+            if missing:
+                raise ProfileError("missing dependencies: " + ", ".join(missing))
             print(f"profile {profile['id']}: OK (shell={shell}, cwd={cwd})")
         except ProfileError as exc:
             failures += 1
