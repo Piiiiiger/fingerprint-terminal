@@ -20,6 +20,8 @@ from .conversations import (
     ConversationError,
     ConversationManager,
     TrashEntry,
+    active_claude_sessions,
+    terminate_claude_session,
 )
 
 
@@ -690,6 +692,11 @@ class ConversationWindow(Adw.Window):
             self.clear_category_button.set_sensitive(category_count > 0)
 
         categories = self.manager.categories()
+        running_claude = (
+            active_claude_sessions(self.manager.profile_id)
+            if self.selected_provider == "claude"
+            else {}
+        )
         for conversation in records:
             row = Adw.ActionRow(title=conversation.title)
             project = Path(conversation.cwd).name if conversation.cwd else "目录未知"
@@ -720,6 +727,14 @@ class ConversationWindow(Adw.Window):
             )
             row.add_suffix(edit)
 
+            if conversation.provider == "claude" and conversation.session_id in running_claude:
+                stop = Gtk.Button(label="结束进程")
+                stop.add_css_class("flat")
+                stop.set_tooltip_text("结束这条会话的 Claude 进程")
+                stop.set_valign(Gtk.Align.CENTER)
+                stop.connect("clicked", self._confirm_stop_claude, conversation.session_id, conversation.title)
+                row.add_suffix(stop)
+
             trash = Gtk.Button(icon_name="user-trash-symbolic")
             trash.add_css_class("flat")
             trash.set_tooltip_text("移入回收站")
@@ -728,6 +743,39 @@ class ConversationWindow(Adw.Window):
             row.add_suffix(trash)
             self.active_group.add(row)
             self.active_rows.append(row)
+
+    def _confirm_stop_claude(
+        self, _button: Gtk.Button, session_id: str, title: str
+    ) -> None:
+        dialog = Adw.MessageDialog.new(
+            self, "结束 Claude 进程？",
+            f"将结束“{title}”正在运行的 Claude 进程。当前操作可能中断，历史会话仍会保留。",
+        )
+        dialog.add_response("cancel", "取消")
+        dialog.add_response("stop", "结束进程")
+        dialog.set_close_response("cancel")
+        dialog.set_response_appearance("stop", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.connect("response", self._stop_claude_response, session_id)
+        dialog.present()
+
+    def _stop_claude_response(
+        self, _dialog: Adw.MessageDialog, response: str, session_id: str
+    ) -> None:
+        if response != "stop":
+            return
+        try:
+            terminate_claude_session(self.manager.profile_id, session_id)
+        except ConversationError as exc:
+            self._toast(str(exc))
+            self.refresh()
+            return
+        self._toast("已请求结束这条 Claude 会话的进程")
+        GLib.timeout_add(1000, self._refresh_after_stop)
+
+    def _refresh_after_stop(self) -> bool:
+        if self.get_visible():
+            self.refresh()
+        return False
 
     def _edit_title(
         self,

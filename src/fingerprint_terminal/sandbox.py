@@ -16,6 +16,8 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
+from .system_view import SystemViewError, mode as system_mode, system_root
+
 
 PROFILE_DATA_ROOT = Path.home() / ".local" / "share" / "fingerprint-terminal" / "profiles"
 _USERNAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
@@ -41,6 +43,18 @@ _INJECTED_FILES = (
     ("--ro-bind-data", "0444", "boot_id", "/proc/sys/kernel/random/boot_id"),
 )
 
+# This is a DMI-facing identity only. CPU, PCI, display and kernel interfaces
+# remain the real kernel/compositor views and must not be presented as emulated.
+_THINKBOOK_DMI = {
+    "sys_vendor": "LENOVO",
+    "product_name": "ThinkBook 14 G7 IML",
+    "product_family": "ThinkBook",
+    "board_vendor": "LENOVO",
+    "bios_vendor": "LENOVO",
+    "chassis_vendor": "LENOVO",
+    "chassis_type": "10",
+}
+
 
 class SandboxError(RuntimeError):
     """Raised when a strict sandbox cannot be prepared safely."""
@@ -49,6 +63,12 @@ class SandboxError(RuntimeError):
 def settings(profile: Mapping[str, Any]) -> Mapping[str, Any]:
     raw = profile.get("sandbox", {})
     return raw if isinstance(raw, Mapping) else {}
+
+
+def _dmi_values(profile: Mapping[str, Any]) -> Mapping[str, str]:
+    if settings(profile).get("dmi_profile", "none") == "thinkbook-14-g7-iml":
+        return _THINKBOOK_DMI
+    return {}
 
 
 def is_strict(profile: Mapping[str, Any]) -> bool:
@@ -245,12 +265,20 @@ def _identity_files(
     hosts.chmod(0o644)
 
     zoneinfo = Path("/usr/share/zoneinfo") / timezone
-    if not zoneinfo.is_file():
+    if not (_usr_source(profile) / "share/zoneinfo" / timezone).is_file():
         raise SandboxError(f"strict sandbox timezone is unavailable: {timezone!r}")
 
     resolv = Path(str(env.get("FT_RESOLV_CONF") or ""))
     if not resolv.is_file():
         raise SandboxError("strict sandbox requires the transparent DNS runtime file")
+
+    dmi_files: dict[str, Path] = {}
+    for name, value in _dmi_values(profile).items():
+        path = root / "dmi" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value + "\n", encoding="ascii")
+        path.chmod(0o644)
+        dmi_files[f"dmi_{name}"] = path
 
     return {
         "machine_id": _stable_machine_id(profile),
@@ -265,10 +293,22 @@ def _identity_files(
         "hosts": hosts,
         "zoneinfo": zoneinfo,
         "resolv": resolv,
+        **dmi_files,
     }
 
 
-def _append_safe_etc_bindings(command: list[str]) -> None:
+def _usr_source(profile: Mapping[str, Any]) -> Path:
+    if system_mode(profile) != "private":
+        return Path("/usr")
+    try:
+        return system_root(profile) / "usr"
+    except SystemViewError as exc:
+        raise SandboxError(str(exc)) from exc
+
+
+def _append_safe_etc_bindings(
+    command: list[str], source_root: Path | None = None
+) -> None:
     """Expose only non-personal system configuration needed by CLI tools."""
 
     for path in (
@@ -284,19 +324,20 @@ def _append_safe_etc_bindings(command: list[str]) -> None:
         "/etc/ld.so.cache",
         "/etc/ld.so.conf",
     ):
-        source = Path(path)
+        source = (source_root / path.lstrip("/")) if source_root else Path(path)
         if source.is_file():
-            command.extend(["--ro-bind", path, path])
+            command.extend(["--ro-bind", str(source), path])
 
-    for path in (
+    directories = (
         "/etc/ssl",
         "/etc/ca-certificates",
         "/etc/pki",
         "/etc/ld.so.conf.d",
-    ):
-        source = Path(path)
+    ) + (("/etc/fonts",) if source_root else ())
+    for path in directories:
+        source = (source_root / path.lstrip("/")) if source_root else Path(path)
         if source.is_dir():
-            command.extend(["--ro-bind", path, path])
+            command.extend(["--ro-bind", str(source), path])
 
 
 def _share_entries(profile: Mapping[str, Any]) -> list[tuple[Path, str, str]]:
@@ -374,6 +415,11 @@ def _safe_environment(
     if wayland is not None:
         _source, display = wayland
         safe["WAYLAND_DISPLAY"] = display
+    if system_mode(profile) == "private":
+        safe["XDG_CURRENT_DESKTOP"] = "niri"
+        safe["XDG_SESSION_DESKTOP"] = "niri"
+        if wayland is not None:
+            safe["XDG_SESSION_TYPE"] = "wayland"
 
     reserved = {
         "HOME",
@@ -388,6 +434,9 @@ def _safe_environment(
         "XDG_DATA_HOME",
         "XDG_STATE_HOME",
         "XDG_RUNTIME_DIR",
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "XDG_SESSION_TYPE",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "ALL_PROXY",
@@ -420,6 +469,7 @@ def strict_command(
         raise SandboxError("strict sandbox child command is empty")
 
     shell = str(child[0])
+    usr_source = _usr_source(profile)
     host_home = _prepare_home(profile)
     files = _identity_files(profile, env, shell)
     username = sandbox_username(profile)
@@ -440,7 +490,7 @@ def strict_command(
         "--tmpfs",
         "/",
         "--ro-bind",
-        "/usr",
+        str(usr_source),
         "/usr",
         "--tmpfs",
         "/etc",
@@ -502,6 +552,22 @@ def strict_command(
         command.extend(["--perms", perms, option, str(fd), target])
         injected.append(str(files[key]))
 
+    if _dmi_values(profile):
+        command.extend([
+            "--dir", "/sys/devices",
+            "--dir", "/sys/devices/virtual",
+            "--dir", "/sys/devices/virtual/dmi",
+            "--dir", "/sys/devices/virtual/dmi/id",
+            "--dir", "/sys/class",
+            "--dir", "/sys/class/dmi",
+            "--symlink", "../../devices/virtual/dmi/id", "/sys/class/dmi/id",
+        ])
+        for name in _dmi_values(profile):
+            fd = _FIRST_INJECTED_FD + len(injected)
+            target = f"/sys/devices/virtual/dmi/id/{name}"
+            command.extend(["--perms", "0444", "--file", str(fd), target])
+            injected.append(str(files[f"dmi_{name}"]))
+
     if wayland is not None:
         source, display = wayland
         command.extend(
@@ -512,12 +578,14 @@ def strict_command(
             ]
         )
 
-    _append_safe_etc_bindings(command)
+    source_root = usr_source.parent if system_mode(profile) == "private" else None
+    _append_safe_etc_bindings(command, source_root)
     command.extend(["--remount-ro", "/etc"])
 
     # Re-expose only explicitly approved host directories under the private
     # profile HOME.  Everything else from /home is absent.
-    for source, target, mode in _share_entries(profile):
+    shares = _share_entries(profile)
+    for source, target, mode in shares:
         target_relative = PurePosixPath(target).relative_to(PurePosixPath(home))
         target_host = host_home / Path(target_relative.as_posix())
         target_host.mkdir(parents=True, exist_ok=True)
@@ -526,6 +594,15 @@ def strict_command(
             str(source),
             target,
         ])
+
+    for raw in settings(profile).get("hidden_paths", []) or []:
+        relative = PurePosixPath(raw)
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            raise SandboxError(f"unsafe hidden path: {raw!r}")
+        for source, target, _mode in shares:
+            hidden_source = source / Path(relative.as_posix())
+            if hidden_source.is_dir() and hidden_source.resolve().is_relative_to(source):
+                command.extend(["--tmpfs", str(PurePosixPath(target) / relative)])
 
     command.append("--clearenv")
     for key, value in safe_env.items():
@@ -551,4 +628,3 @@ def _with_injected_descriptors(command: list[str], sources: Sequence[str]) -> li
     )
     script = f'exec "${{@:{len(sources) + 1}}}" {redirects}'
     return [bash, "-c", script, "bwrap", *sources, *command]
-

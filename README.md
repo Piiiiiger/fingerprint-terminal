@@ -60,12 +60,22 @@ approved strict share.  When that share lives below the host HOME, the bridge
 also re-binds it at the same relative path inside the private HOME.  This lets
 an Obsidian vault such as `/home/user/code/vault` remain
 `/home/user/code/vault` from the agent's point of view without exposing any
-additional host directory.
+additional host directory. Bridge-only compatibility mountpoints are leased
+per running process and removed when the last bridge exits; empty leftovers
+from an abnormal exit are collected when the settings window is opened or
+refreshed.
+
+For the existing `strict-auto-ip` home, `install.sh` also installs a small
+profile-local `obsidian` command. It supports only
+`obsidian vault=vault delete path=<relative-file>`, moving a file into the vault's `.trash` without
+launching the desktop app. Other Obsidian commands return an unsupported
+result; the host Obsidian installation is unaffected.
 
 ## Quick start
 
 ```bash
 cd ~/code/fingerprint-terminal
+./bin/fingerprint-terminal prepare-system strict-auto-ip
 ./bin/fingerprint-terminal doctor
 ./bin/fingerprint-terminal list
 ./bin/fingerprint-terminal launch local
@@ -80,7 +90,23 @@ After `./install.sh`, the same commands can be run from anywhere without the
 transparent network namespace through the same local mixed proxy used by the
 reference ChatGPT desktop: `127.0.0.1:7898`.  It uses a persistent private
 profile HOME mounted at `/home/<sandbox-user>`, a profile-specific machine-id, private `/run`, `/tmp`, `/proc`,
-`/dev`, an empty `/sys`, a small private read-only `/etc`, and a scrubbed environment.
+`/dev`, a private `/sys`, a small private read-only `/etc`, and a scrubbed environment.
+The strict profile also uses `sandbox.system=private`: `prepare-system` builds
+an independent Arch `/usr` from signed packages in profile storage. It includes
+common CLI tools, en_US.UTF-8 locale data, generic Noto/Liberation fonts, and
+one synthetic niri session entry. Its desktop environment variables identify
+niri as well. The host `/usr` is not mounted inside this
+mode. Its package set can be rebuilt with `prepare-system strict-auto-ip
+--refresh`; existing sessions keep their current mount and old releases remain
+in profile storage until removed after those sessions end. New strict sessions
+fail closed if the private system view is missing or incomplete.
+An optional `sandbox.dmi_profile=thinkbook-14-g7-iml` adds Lenovo ThinkBook
+14 G7 IML vendor/model fields under the otherwise private `/sys` view. That
+model's published specifications are documented in
+[Lenovo PSREF](https://psref.lenovo.com/syspool/Sys/PDF/ThinkBook/ThinkBook_14_G7_IML/ThinkBook_14_G7_IML_Spec.pdf).
+It does not emulate the hardware: the real CPU, PCI IDs, kernel, and Wayland
+display properties remain observable. No serial number or host DMI value is
+copied into the sandbox.
 The shell receives no `FT_*` variables, and the generated `/etc` identity files
 are copied in rather than bind-mounted, so the sandbox's mount table does not
 name the profile storage for them.  The persistent HOME is still a bind mount,
@@ -89,6 +115,19 @@ The host's real home directory is not present: the sandbox home pathname is back
 profile's private HOME.  The default example exposes only the host `~/code`,
 mounted explicitly under the sandbox home (for example `~/code`); add more `sandbox.shares` entries only
 when a host directory is intentionally needed.
+
+The private `/usr` removes the host's package, font, and login-session inventory
+from the strict filesystem view. It is still an Arch userland: package and tool
+versions remain observable, and individual programs can reveal their own build
+details. The runtime timezone and locale continue to follow the verified proxy
+exit rather than a fixed location; when the exit is Singapore, the shell uses
+`Asia/Singapore` and `en_SG.UTF-8`.
+
+For an approved share that contains app-private metadata, set
+`sandbox.hidden_paths` to directory paths relative to that share. Those
+directories are covered by empty tmpfs mounts inside strict sessions while
+remaining available to host applications. The setting applies to duplicate
+bridge mounts of the same share as well.
 
 The default strict profile can expose only the selected host Wayland socket
 for clipboard/image paste support. The host D-Bus session, SSH agent, Docker
@@ -228,4 +267,3 @@ python3 -m compileall -q src
 ```
 
 The project uses only the Python standard library for CLI/runtime code and tests. The optional manager uses the same GTK4/libadwaita stack already present on this host and in the sibling fingerprint desktop projects.
-

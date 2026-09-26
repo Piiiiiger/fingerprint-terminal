@@ -11,6 +11,11 @@ mkdir -p "$bin_dir" "$libexec_dir" "$applications_dir" "$systemd_dir"
 ln -sfn "$root_dir/bin/fingerprint-terminal" "$bin_dir/fingerprint-terminal"
 ln -sfn "$root_dir/bin/fingerprint-terminal-claude-bridge" "$libexec_dir/claude"
 ln -sfn "$root_dir/bin/fingerprint-terminal-codex-bridge" "$libexec_dir/codex"
+strict_home="${HOME}/.local/share/fingerprint-terminal/profiles/strict-auto-ip/home"
+if [[ -d "$strict_home" ]]; then
+  mkdir -p "$strict_home/.local/bin"
+  install -m 755 "$root_dir/host/obsidian-vault-cli.py" "$strict_home/.local/bin/obsidian"
+fi
 cp "$root_dir/assets/io.fingerprintterminal.FingerprintTerminal.desktop" \
   "$applications_dir/io.fingerprintterminal.FingerprintTerminal.desktop"
 cp "$root_dir/assets/io.fingerprintterminal.FingerprintTerminal.Settings.desktop" \
@@ -35,4 +40,3 @@ echo "Installed Codex bridge: $libexec_dir/codex"
 echo "Installed desktop entry: $applications_dir/io.fingerprintterminal.FingerprintTerminal.desktop"
 echo "Installed settings entry: $applications_dir/io.fingerprintterminal.FingerprintTerminal.Settings.desktop"
 echo "Installed conversation cleanup timer: $systemd_dir/fingerprint-terminal-conversation-cleanup.timer"
-

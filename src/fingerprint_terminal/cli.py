@@ -13,10 +13,17 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import __version__
+from .bridge_leases import create_bridge_lease, release_bridge_lease
 from .conversations import ConversationError, ConversationManager
 from .identity import IdentityError, detect_exit_identity
 from .network import NetworkError, TRANSPARENT_DEPENDENCIES, isolation_command, is_transparent, prepare_transparent_environment
 from .sandbox import SandboxError, is_strict, strict_command
+from .system_view import (
+    SystemViewError,
+    mode as system_view_mode,
+    prepare_system_view,
+    system_root,
+)
 from .profiles import (
     ProfileError,
     build_environment,
@@ -82,6 +89,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("config", help="print the active profile config path")
     sub.add_parser("doctor", help="check native terminal/profile prerequisites")
+    prepare_system = sub.add_parser(
+        "prepare-system", help="build an independent /usr for a strict profile"
+    )
+    prepare_system.add_argument("profile", nargs="?", default="strict-auto-ip")
+    prepare_system.add_argument(
+        "--refresh", action="store_true", help="build a new release and switch future sessions"
+    )
     sub.add_parser("manager", help="open the GTK profile manager")
 
     conversations = sub.add_parser(
@@ -111,6 +125,7 @@ def cmd_list() -> int:
             f"terminal={terminal.get('backend', 'auto'):<8} "
             f"network={network.get('mode', 'inherit'):<11} "
             f"sandbox={sandbox.get('mode', 'off'):<6} "
+            f"system={sandbox.get('system', 'host'):<7} "
             f"proxy={proxy.get('mode', 'inherit')}"
         )
     return 0
@@ -203,6 +218,11 @@ def cmd_bridge(profile_id: str, cwd: str | None, command: Sequence[str]) -> int:
 
     profile = copy.deepcopy(load_store().get(profile_id))
     strict = is_strict(profile)
+    configured_targets = {
+        str(share.get("target", "") or "")
+        for share in profile.get("sandbox", {}).get("shares", []) or []
+    }
+    ephemeral_targets: set[str] = set()
     if cwd:
         host_cwd = Path(cwd).expanduser().resolve()
         if not host_cwd.is_dir():
@@ -226,21 +246,23 @@ def cmd_bridge(profile_id: str, cwd: str | None, command: Sequence[str]) -> int:
                 except ValueError:
                     continue
                 if source_relative.parts:
+                    compatibility_target = source_relative.as_posix()
                     # If the configured share already preserves the host-home
                     # relative path (for example Downloads -> Downloads), the
                     # normal share is already reachable at the exact absolute
                     # path expected by GUI integrations.  Do not add the same
                     # bind a second time.
-                    if str(share.get("target", "")) == source_relative.as_posix():
+                    if compatibility_target in configured_targets:
                         break
                     duplicate = {
                         "source": str(source),
-                        "target": source_relative.as_posix(),
+                        "target": compatibility_target,
                         "mode": str(share.get("mode", "rw")),
                     }
                     sandbox = dict(profile.get("sandbox", {}))
                     sandbox["shares"] = [duplicate, *shares]
                     profile["sandbox"] = sandbox
+                    ephemeral_targets.add(compatibility_target)
                 break
         profile.setdefault("terminal", {})["cwd"] = str(host_cwd)
 
@@ -253,11 +275,24 @@ def cmd_bridge(profile_id: str, cwd: str | None, command: Sequence[str]) -> int:
 
     if is_transparent(profile):
         env, _identity = prepare_transparent_environment(profile, env)
-        if strict:
-            child = strict_command(profile, child, env)
-        isolated = isolation_command(child)
-        os.execvpe(isolated[0], isolated, env)
-        raise AssertionError("os.execvpe returned unexpectedly")
+        lease = None
+        try:
+            if strict and ephemeral_targets:
+                lease = create_bridge_lease(
+                    profile_id, ephemeral_targets, configured_targets
+                )
+                if lease is not None:
+                    env["FT_BRIDGE_LEASE_FILE"] = str(lease)
+                    env["FT_BRIDGE_HOST_HOME"] = str(Path.home().resolve())
+            if strict:
+                child = strict_command(profile, child, env)
+            isolated = isolation_command(child)
+            os.execvpe(isolated[0], isolated, env)
+            raise AssertionError("os.execvpe returned unexpectedly")
+        except BaseException:
+            if lease is not None:
+                release_bridge_lease(lease)
+            raise
 
     if strict:
         child = strict_command(profile, child, env)
@@ -312,11 +347,20 @@ def cmd_doctor() -> int:
             missing = [name for name in profile_dependencies(profile) if not shutil.which(name)]
             if missing:
                 raise ProfileError("missing dependencies: " + ", ".join(missing))
+            if is_strict(profile) and system_view_mode(profile) == "private":
+                system_root(profile)
             print(f"profile {profile['id']}: OK (shell={shell}, cwd={cwd})")
-        except ProfileError as exc:
+        except (ProfileError, SystemViewError) as exc:
             failures += 1
             print(f"profile {profile.get('id', '?')}: ERROR: {exc}")
     return 1 if failures else 0
+
+
+def cmd_prepare_system(profile_id: str, *, refresh: bool) -> int:
+    profile = load_store().get(profile_id)
+    root = prepare_system_view(profile, refresh=refresh)
+    print(f"private system view ready: {root / 'usr'}")
+    return 0
 
 
 def cmd_manager() -> int:
@@ -369,11 +413,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.subcommand == "doctor":
             return cmd_doctor()
+        if args.subcommand == "prepare-system":
+            return cmd_prepare_system(args.profile, refresh=args.refresh)
         if args.subcommand == "manager":
             return cmd_manager()
         if args.subcommand == "conversations":
             return cmd_conversations(args.conversation_command)
-    except (ProfileError, NetworkError, IdentityError, SandboxError, ConversationError) as exc:
+    except (ProfileError, NetworkError, IdentityError, SandboxError, SystemViewError, ConversationError) as exc:
         print(f"fingerprint-terminal: {exc}", file=sys.stderr)
         return 2
     return 2
@@ -381,4 +427,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

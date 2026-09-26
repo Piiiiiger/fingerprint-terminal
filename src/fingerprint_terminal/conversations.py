@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import signal
 import shutil
 import sqlite3
 import time
@@ -325,7 +326,102 @@ def _process_belongs_to_profile(pid: int, profile_id: str) -> bool:
     return marker in mountinfo
 
 
-def provider_is_running(provider: str, profile_id: str = "strict-auto-ip") -> bool:
+def _claude_process_uses_session(arguments: list[str], session_id: str) -> bool:
+    """Treat an unidentified Claude process as busy, but allow other sessions."""
+
+    for index, argument in enumerate(arguments):
+        for option in ("--resume", "--session-id"):
+            if argument == option:
+                if index + 1 >= len(arguments) or arguments[index + 1].startswith("-"):
+                    return True
+                return arguments[index + 1] == session_id
+            if argument.startswith(option + "="):
+                value = argument.partition("=")[2]
+                return not value or value == session_id
+    return True
+
+
+def _claude_session_id(arguments: list[str]) -> str | None:
+    """Return a session only when Claude names it explicitly in its command."""
+
+    for index, argument in enumerate(arguments):
+        for option in ("--resume", "--session-id"):
+            if argument == option:
+                if index + 1 < len(arguments) and not arguments[index + 1].startswith("-"):
+                    return arguments[index + 1]
+                return None
+            if argument.startswith(option + "="):
+                return argument.partition("=")[2] or None
+    return None
+
+
+def _claude_pid_matches(pid: int, profile_id: str, session_id: str) -> bool:
+    entry = Path(f"/proc/{pid}")
+    try:
+        raw = (entry / "cmdline").read_bytes().split(b"\0")
+        if not raw or Path(raw[0].decode("utf-8", errors="ignore")).name != "claude":
+            return False
+        arguments = [part.decode("utf-8", errors="replace") for part in raw[1:] if part]
+        return _claude_session_id(arguments) == session_id and _process_belongs_to_profile(pid, profile_id)
+    except (OSError, UnicodeError):
+        return False
+
+
+def active_claude_sessions(profile_id: str = "strict-auto-ip") -> dict[str, list[int]]:
+    """Map explicitly named Claude sessions to processes in this profile."""
+
+    result: dict[str, list[int]] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            raw = (entry / "cmdline").read_bytes().split(b"\0")
+            if not raw or Path(raw[0].decode("utf-8", errors="ignore")).name != "claude":
+                continue
+            arguments = [part.decode("utf-8", errors="replace") for part in raw[1:] if part]
+            session_id = _claude_session_id(arguments)
+            if session_id and _process_belongs_to_profile(pid, profile_id):
+                result.setdefault(session_id, []).append(pid)
+        except (OSError, UnicodeError):
+            continue
+    return result
+
+
+def terminate_claude_session(profile_id: str, session_id: str) -> int:
+    """Request a named Claude session to exit, using pidfds to avoid PID reuse."""
+
+    pids = active_claude_sessions(profile_id).get(session_id, [])
+    if not pids:
+        raise ConversationError("这条 Claude 会话已经没有运行中的进程")
+    signaled = 0
+    for pid in pids:
+        try:
+            fd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            raise ConversationError(f"无法定位 Claude 进程：{exc}") from exc
+        try:
+            if not _claude_pid_matches(pid, profile_id, session_id):
+                continue
+            try:
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+                signaled += 1
+            except ProcessLookupError:
+                continue
+            except OSError as exc:
+                raise ConversationError(f"无法结束 Claude 进程：{exc}") from exc
+        finally:
+            os.close(fd)
+    if not signaled:
+        raise ConversationError("这条 Claude 会话已经没有运行中的进程")
+    return signaled
+
+
+def provider_is_running(
+    provider: str, profile_id: str = "strict-auto-ip", session_id: str | None = None
+) -> bool:
     expected = {"claude": "claude", "codex": "codex"}.get(provider)
     if expected is None:
         return False
@@ -336,13 +432,18 @@ def provider_is_running(provider: str, profile_id: str = "strict-auto-ip") -> bo
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
             continue
         try:
-            if (entry / "comm").read_text(encoding="utf-8").strip() == expected:
-                if _process_belongs_to_profile(int(entry.name), profile_id):
-                    return True
+            comm_matches = (entry / "comm").read_text(encoding="utf-8").strip() == expected
             raw = (entry / "cmdline").read_bytes().split(b"\0")
-            if raw and Path(raw[0].decode("utf-8", errors="ignore")).name == expected:
-                if _process_belongs_to_profile(int(entry.name), profile_id):
-                    return True
+            command_matches = bool(raw and Path(raw[0].decode("utf-8", errors="ignore")).name == expected)
+            if not (comm_matches or command_matches):
+                continue
+            if not _process_belongs_to_profile(int(entry.name), profile_id):
+                continue
+            if provider == "claude" and session_id is not None:
+                arguments = [part.decode("utf-8", errors="replace") for part in raw[1:] if part]
+                if not _claude_process_uses_session(arguments, session_id):
+                    continue
+            return True
         except (OSError, UnicodeError):
             continue
     return False
@@ -455,7 +556,7 @@ class ConversationManager:
             raise ConversationError("标题不能超过 200 个字符")
 
         conversation = self._active_by_key(key)
-        if provider_is_running(conversation.provider, self.profile_id):
+        if provider_is_running(conversation.provider, self.profile_id, conversation.session_id):
             label = "Claude Code" if conversation.provider == "claude" else "Codex"
             raise ConversationError(f"请先退出正在运行的 {label}，再修改标题")
 
@@ -755,7 +856,7 @@ class ConversationManager:
 
     def move_to_trash(self, key: str) -> TrashEntry:
         conversation = self._active_by_key(key)
-        if provider_is_running(conversation.provider, self.profile_id):
+        if provider_is_running(conversation.provider, self.profile_id, conversation.session_id):
             label = "Claude Code" if conversation.provider == "claude" else "Codex"
             raise ConversationError(f"请先退出正在运行的 {label}，再移动其会话")
         destination = self.trash_root / conversation.provider / conversation.session_id
@@ -839,7 +940,7 @@ class ConversationManager:
         entry = next((item for item in self.trash_entries() if item.key == key), None)
         if entry is None:
             raise ConversationError("回收站中找不到该会话")
-        if provider_is_running(entry.provider, self.profile_id):
+        if provider_is_running(entry.provider, self.profile_id, entry.session_id):
             label = "Claude Code" if entry.provider == "claude" else "Codex"
             raise ConversationError(f"请先退出正在运行的 {label}，再恢复其会话")
         directory = Path(entry.entry_dir)

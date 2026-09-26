@@ -15,6 +15,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
+from .bridge_leases import cleanup_stale_bridge_leases
 from .cli import launch_command
 from .network import STATE_ROOT
 from .profiles import ProfileError, load_store, validate_document
@@ -224,6 +225,15 @@ def _ensure_share_targets(private_home: Path, targets: set[str]) -> int:
     return created
 
 
+def _cleanup_stale_bridge_targets(profile_id: str, protected: set[str]) -> int:
+    """Best-effort cleanup must never prevent the settings window opening."""
+
+    try:
+        return cleanup_stale_bridge_leases(profile_id, protected)
+    except (OSError, RuntimeError, ValueError):
+        return 0
+
+
 def _label(
     text: str = "",
     *css_classes: str,
@@ -244,6 +254,9 @@ class ManagerWindow(Adw.ApplicationWindow):
         self.store = load_store()
         self.profile = self._load_default_profile()
         self._known_share_targets = _share_targets(self.profile)
+        _cleanup_stale_bridge_targets(
+            str(self.profile["id"]), self._known_share_targets
+        )
         _ensure_share_targets(self._private_home_path(), self._known_share_targets)
         self._share_chooser: Gtk.FileChooserNative | None = None
         self._reload_pending = False
@@ -867,6 +880,9 @@ class ManagerWindow(Adw.ApplicationWindow):
             self._known_share_targets = _share_targets(self.profile)
             cleaned = _cleanup_empty_share_targets(
                 self._private_home_path(), previous_targets - self._known_share_targets
+            )
+            cleaned += _cleanup_stale_bridge_targets(
+                str(self.profile["id"]), self._known_share_targets
             )
             created = _ensure_share_targets(
                 self._private_home_path(), self._known_share_targets

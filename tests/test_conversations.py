@@ -1,17 +1,63 @@
 from __future__ import annotations
 
 import json
+import signal
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fingerprint_terminal.conversations import ConversationManager
+from fingerprint_terminal.conversations import (
+    ConversationManager,
+    _claude_process_uses_session,
+    _claude_session_id,
+    terminate_claude_session,
+)
 
 
 CLAUDE_ID = "11111111-1111-4111-8111-111111111111"
 CODEX_ID = "22222222-2222-4222-8222-222222222222"
+
+
+class ClaudeProcessTests(unittest.TestCase):
+    def test_resume_only_blocks_its_own_session(self) -> None:
+        self.assertTrue(_claude_process_uses_session([f"--resume={CLAUDE_ID}"], CLAUDE_ID))
+        self.assertFalse(_claude_process_uses_session([f"--resume={CLAUDE_ID}"], CODEX_ID))
+        self.assertFalse(_claude_process_uses_session(["--resume", CLAUDE_ID], CODEX_ID))
+        self.assertTrue(_claude_process_uses_session(["--continue"], CODEX_ID))
+        self.assertTrue(_claude_process_uses_session(["--resume"], CODEX_ID))
+        self.assertTrue(_claude_process_uses_session(["--resume="], CODEX_ID))
+
+    def test_only_explicit_session_ids_can_be_stopped(self) -> None:
+        self.assertEqual(_claude_session_id([f"--resume={CLAUDE_ID}"]), CLAUDE_ID)
+        self.assertEqual(_claude_session_id(["--session-id", CLAUDE_ID]), CLAUDE_ID)
+        self.assertIsNone(_claude_session_id(["--continue"]))
+
+    @patch("fingerprint_terminal.conversations.os.close")
+    @patch("fingerprint_terminal.conversations.signal.pidfd_send_signal")
+    @patch("fingerprint_terminal.conversations._claude_pid_matches", return_value=False)
+    @patch("fingerprint_terminal.conversations.os.pidfd_open", return_value=23)
+    @patch("fingerprint_terminal.conversations.active_claude_sessions", return_value={CLAUDE_ID: [123]})
+    def test_stop_rechecks_process_before_signal(
+        self, _sessions, _open, _matches, send_signal, close
+    ) -> None:
+        with self.assertRaisesRegex(Exception, "已经没有运行中的进程"):
+            terminate_claude_session("strict-auto-ip", CLAUDE_ID)
+        send_signal.assert_not_called()
+        close.assert_called_once_with(23)
+
+    @patch("fingerprint_terminal.conversations.os.close")
+    @patch("fingerprint_terminal.conversations.signal.pidfd_send_signal")
+    @patch("fingerprint_terminal.conversations._claude_pid_matches", return_value=True)
+    @patch("fingerprint_terminal.conversations.os.pidfd_open", return_value=23)
+    @patch("fingerprint_terminal.conversations.active_claude_sessions", return_value={CLAUDE_ID: [123]})
+    def test_stop_signals_only_named_session(
+        self, _sessions, _open, _matches, send_signal, close
+    ) -> None:
+        self.assertEqual(terminate_claude_session("strict-auto-ip", CLAUDE_ID), 1)
+        send_signal.assert_called_once_with(23, signal.SIGTERM)
+        close.assert_called_once_with(23)
 
 
 class ConversationManagerTests(unittest.TestCase):

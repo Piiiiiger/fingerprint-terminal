@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fingerprint_terminal import sandbox
+from fingerprint_terminal import system_view
 from fingerprint_terminal.profiles import ProfileError, validate_profile
 
 
@@ -51,11 +52,127 @@ class SandboxTests(unittest.TestCase):
         with self.assertRaises(ProfileError):
             validate_profile(bad_home)
 
+    def test_dmi_profile_requires_private_strict_system(self) -> None:
+        profile = self.profile("/tmp")
+        profile["sandbox"]["dmi_profile"] = "thinkbook-14-g7-iml"
+        with self.assertRaisesRegex(ProfileError, "private system view"):
+            validate_profile(profile)
+        profile["sandbox"]["system"] = "private"
+        validate_profile(profile)
+
     def test_share_target_cannot_escape_private_home(self) -> None:
         profile = self.profile("/tmp")
         profile["sandbox"]["shares"][0]["target"] = "../escape"
         with self.assertRaises(ProfileError):
             validate_profile(profile)
+
+    def test_hidden_share_directory_is_masked_at_each_mount(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share = root / "share"
+            (share / ".claudian").mkdir(parents=True)
+            profile = self.profile(str(share))
+            profile["sandbox"]["hidden_paths"] = [".claudian"]
+            profile["sandbox"]["shares"].append(
+                {"source": str(share), "target": "code/vault", "mode": "rw"}
+            )
+            resolv = root / "resolv.conf"
+            resolv.write_text("nameserver 192.168.1.1\n", encoding="utf-8")
+            with patch.object(sandbox, "PROFILE_DATA_ROOT", root / "profiles"):
+                command = sandbox.strict_command(
+                    profile, ["/usr/bin/true"], {"FT_RESOLV_CONF": str(resolv)}
+                )
+            masks = [
+                command[index + 1]
+                for index, arg in enumerate(command[:-1])
+                if arg == "--tmpfs"
+            ]
+            self.assertIn("/home/dev/code/.claudian", masks)
+            self.assertIn("/home/dev/code/vault/.claudian", masks)
+
+    def test_hidden_paths_reject_parent_traversal(self) -> None:
+        profile = self.profile("/tmp")
+        profile["sandbox"]["hidden_paths"] = ["../private"]
+        with self.assertRaises(ProfileError):
+            validate_profile(profile)
+
+    def test_private_system_mounts_only_profile_usr_and_etc(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share = root / "share"
+            share.mkdir()
+            resolv = root / "resolv.conf"
+            resolv.write_text("nameserver 192.168.1.1\n", encoding="utf-8")
+            profile = self.profile(str(share))
+            profile["sandbox"]["system"] = "private"
+            release = root / "profiles/strict-test/system/releases/test"
+            for relative in (
+                "usr/bin/bash", "usr/bin/python3",
+                "usr/share/zoneinfo/America/Los_Angeles",
+                "usr/share/wayland-sessions/niri.desktop", "ready.json",
+                "etc/nsswitch.conf", "etc/ssl/cert.pem",
+            ):
+                path = release / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("test", encoding="utf-8")
+            (release.parent.parent / "current").symlink_to("releases/test")
+            with patch.object(sandbox, "PROFILE_DATA_ROOT", root / "profiles"), \
+                 patch.object(system_view, "PROFILE_DATA_ROOT", root / "profiles"):
+                command = sandbox.strict_command(
+                    profile, ["/usr/bin/bash", "-l"],
+                    {"TZ": "America/Los_Angeles", "FT_RESOLV_CONF": str(resolv)},
+                )
+            mounts = [
+                (command[index + 1], command[index + 2])
+                for index, value in enumerate(command[:-2]) if value == "--ro-bind"
+            ]
+            self.assertIn((str(release / "usr"), "/usr"), mounts)
+            self.assertIn((str(release / "etc/ssl"), "/etc/ssl"), mounts)
+            self.assertNotIn(("/usr", "/usr"), mounts)
+            self.assertNotIn(("/etc/ssl", "/etc/ssl"), mounts)
+            self.assertEqual(command[command.index("XDG_CURRENT_DESKTOP") + 1], "niri")
+
+    def test_thinkbook_dmi_is_copied_into_private_sys_view(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share = root / "share"
+            share.mkdir()
+            resolv = root / "resolv.conf"
+            resolv.write_text("nameserver 192.168.1.1\n", encoding="utf-8")
+            profile = self.profile(str(share))
+            profile["sandbox"].update(system="private", dmi_profile="thinkbook-14-g7-iml")
+            release = root / "profiles/strict-test/system/releases/test"
+            for relative in (
+                "usr/bin/bash", "usr/bin/python3",
+                "usr/share/zoneinfo/America/Los_Angeles",
+                "usr/share/wayland-sessions/niri.desktop", "ready.json",
+            ):
+                path = release / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("test", encoding="utf-8")
+            (release.parent.parent / "current").symlink_to("releases/test")
+            with patch.object(sandbox, "PROFILE_DATA_ROOT", root / "profiles"), \
+                 patch.object(system_view, "PROFILE_DATA_ROOT", root / "profiles"):
+                command = sandbox.strict_command(
+                    profile, ["/usr/bin/bash"],
+                    {"TZ": "America/Los_Angeles", "FT_RESOLV_CONF": str(resolv)},
+                )
+            self.assertIn("/sys/class/dmi/id", command)
+            self.assertIn("/sys/devices/virtual/dmi/id/product_name", command)
+            self.assertEqual(
+                (root / "profiles/strict-test/dmi/product_name").read_text(),
+                "ThinkBook 14 G7 IML\n",
+            )
+            self.assertNotIn(str(root / "profiles/strict-test/dmi/product_name"),
+                             command[command.index("--die-with-parent"):])
+
+    def test_private_system_fails_closed_when_unprepared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = self.profile(tmp)
+            profile["sandbox"]["system"] = "private"
+            with patch.object(system_view, "PROFILE_DATA_ROOT", Path(tmp) / "profiles"):
+                with self.assertRaisesRegex(sandbox.SandboxError, "prepare-system"):
+                    sandbox.strict_command(profile, ["/usr/bin/bash"], {})
 
     def test_command_masks_host_home_and_clears_environment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

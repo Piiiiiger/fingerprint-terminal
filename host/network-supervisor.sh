@@ -35,6 +35,11 @@ cleanup() {
     fi
   done
   wait 2>/dev/null || true
+  if [[ -n "${FT_BRIDGE_LEASE_FILE:-}" ]]; then
+    env HOME="${FT_BRIDGE_HOST_HOME:-$HOME}" \
+      python3 -m fingerprint_terminal.bridge_leases release "$FT_BRIDGE_LEASE_FILE" \
+      >>"$log_dir/bridge-cleanup.log" 2>&1 || true
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -78,7 +83,12 @@ nsenter -t "$app_pid" -n sysctl -q -w net.ipv6.conf.default.disable_ipv6=1
 # Identity-facing system files are private mount-namespace overlays.  Nothing
 # here modifies the host /etc.
 nsenter -t "$app_pid" -m -- mount --bind "$FT_RESOLV_CONF" /etc/resolv.conf
-nsenter -t "$app_pid" -m -- mount --bind "$FT_ZONEINFO_FILE" /etc/localtime
+# Bubblewrap supplies strict sessions with a private /etc/localtime.  Binding
+# over the host's symlink here would instead create a visible mount under the
+# host timezone name in /usr/share/zoneinfo.
+if [[ "${FT_SANDBOX_MODE:-off}" != "strict" ]]; then
+  nsenter -t "$app_pid" -m -- mount --bind "$FT_ZONEINFO_FILE" /etc/localtime
+fi
 if [[ "${FT_PRIVATE_HOSTNAME:-1}" == "1" ]]; then
   nsenter -t "$app_pid" -u -- /usr/bin/python3 -c \
     'import ctypes, os, sys; name=sys.argv[1].encode(); libc=ctypes.CDLL(None, use_errno=True); rc=libc.sethostname(name, len(name)); rc == 0 or (_ for _ in ()).throw(OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno())))' \

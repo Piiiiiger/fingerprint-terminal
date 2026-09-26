@@ -87,6 +87,8 @@
       },
       "sandbox": {
         "mode": "strict",
+        "system": "private",
+        "dmi_profile": "thinkbook-14-g7-iml",
         "username": "dev",
         "clipboard": "wayland",
         "shares": [

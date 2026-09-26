@@ -242,6 +242,24 @@ def validate_profile(profile: Any) -> None:
         raise ProfileError(
             f"profile {profile_id!r}: sandbox.mode must be off or strict"
         )
+    system_mode = sandbox.get("system", "host")
+    if system_mode not in {"host", "private"}:
+        raise ProfileError(
+            f"profile {profile_id!r}: sandbox.system must be host or private"
+        )
+    if system_mode == "private" and sandbox_mode != "strict":
+        raise ProfileError(
+            f"profile {profile_id!r}: private system view requires strict sandbox"
+        )
+    dmi_profile = sandbox.get("dmi_profile", "none")
+    if dmi_profile not in {"none", "thinkbook-14-g7-iml"}:
+        raise ProfileError(
+            f"profile {profile_id!r}: sandbox.dmi_profile must be none or thinkbook-14-g7-iml"
+        )
+    if dmi_profile != "none" and (sandbox_mode != "strict" or system_mode != "private"):
+        raise ProfileError(
+            f"profile {profile_id!r}: sandbox.dmi_profile requires strict mode and a private system view"
+        )
     clipboard_mode = str(sandbox.get("clipboard", "off") or "off")
     if clipboard_mode not in {"off", "wayland"}:
         raise ProfileError(
@@ -297,6 +315,26 @@ def validate_profile(profile: Any) -> None:
             if mode not in {"rw", "ro"}:
                 raise ProfileError(
                     f"profile {profile_id!r}: sandbox share mode must be rw or ro"
+                )
+        hidden_paths = sandbox.get("hidden_paths", []) or []
+        if not isinstance(hidden_paths, list):
+            raise ProfileError(
+                f"profile {profile_id!r}: sandbox.hidden_paths must be a list"
+            )
+        for hidden in hidden_paths:
+            if not isinstance(hidden, str):
+                raise ProfileError(
+                    f"profile {profile_id!r}: sandbox.hidden_paths entries must be strings"
+                )
+            relative = PurePosixPath(hidden)
+            if (
+                not hidden
+                or hidden in {".", ".."}
+                or relative.is_absolute()
+                or ".." in relative.parts
+            ):
+                raise ProfileError(
+                    f"profile {profile_id!r}: sandbox.hidden_paths must be relative directories"
                 )
 
 
@@ -416,4 +454,3 @@ def clone_profile(
     validate_document(store.document)
     store.save()
     return profile
-
