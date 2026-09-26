@@ -107,7 +107,7 @@ class SandboxTests(unittest.TestCase):
             profile["sandbox"]["system"] = "private"
             release = root / "profiles/strict-test/system/releases/test"
             for relative in (
-                "usr/bin/bash", "usr/bin/python3",
+                "usr/bin/bash", "usr/bin/python3", "usr/bin/wl-paste",
                 "usr/share/zoneinfo/America/Los_Angeles",
                 "usr/share/wayland-sessions/niri.desktop", "ready.json",
                 "etc/nsswitch.conf", "etc/ssl/cert.pem",
@@ -143,7 +143,7 @@ class SandboxTests(unittest.TestCase):
             profile["sandbox"].update(system="private", dmi_profile="thinkbook-14-g7-iml")
             release = root / "profiles/strict-test/system/releases/test"
             for relative in (
-                "usr/bin/bash", "usr/bin/python3",
+                "usr/bin/bash", "usr/bin/python3", "usr/bin/wl-paste",
                 "usr/share/zoneinfo/America/Los_Angeles",
                 "usr/share/wayland-sessions/niri.desktop", "ready.json",
             ):

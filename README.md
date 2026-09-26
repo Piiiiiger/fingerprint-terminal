@@ -93,7 +93,7 @@ profile HOME mounted at `/home/<sandbox-user>`, a profile-specific machine-id, p
 `/dev`, a private `/sys`, a small private read-only `/etc`, and a scrubbed environment.
 The strict profile also uses `sandbox.system=private`: `prepare-system` builds
 an independent Arch `/usr` from signed packages in profile storage. It includes
-common CLI tools, en_US.UTF-8 locale data, generic Noto/Liberation fonts, and
+common CLI tools (including `wl-paste` for image clipboard input), en_US.UTF-8 locale data, generic Noto/Liberation fonts, and
 one synthetic niri session entry. Its desktop environment variables identify
 niri as well. The host `/usr` is not mounted inside this
 mode. Its package set can be rebuilt with `prepare-system strict-auto-ip

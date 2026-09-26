@@ -21,7 +21,7 @@ PACKAGES = (
     "gawk", "which", "util-linux", "procps-ng", "iproute2", "openssh",
     "curl", "ca-certificates", "python", "git", "nodejs", "npm",
     "cloudflared", "fontconfig", "noto-fonts", "ttf-liberation", "less",
-    "ripgrep", "tar", "gzip", "xz", "unzip", "jq",
+    "ripgrep", "tar", "gzip", "xz", "unzip", "jq", "wl-clipboard",
 )
 
 
@@ -58,6 +58,7 @@ def system_root(profile: Mapping[str, Any]) -> Path:
         "ready.json",
         "usr/bin/bash",
         "usr/bin/python3",
+        "usr/bin/wl-paste",
         "usr/share/zoneinfo/America/Los_Angeles",
         "usr/share/wayland-sessions/niri.desktop",
     ):
@@ -161,6 +162,7 @@ def prepare_system_view(profile: Mapping[str, Any], *, refresh: bool = False) ->
             encoding="utf-8",
         )
         for relative in ("bin/bash", "bin/python3", "bin/ssh", "bin/cloudflared",
+                         "bin/wl-paste",
                          "share/zoneinfo/America/Los_Angeles"):
             if not (usr / relative).is_file():
                 raise SystemViewError(f"private /usr package is missing: {relative}")
