@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib.util
 import json
 import os
 import shutil
@@ -15,8 +16,8 @@ from typing import Any, Mapping, Sequence
 from . import __version__
 from .bridge_leases import create_bridge_lease, release_bridge_lease
 from .conversations import ConversationError, ConversationManager
-from .identity import IdentityError, detect_exit_identity
-from .network import NetworkError, TRANSPARENT_DEPENDENCIES, isolation_command, is_transparent, prepare_transparent_environment
+from .identity import IdentityError
+from .network import NetworkError, TRANSPARENT_DEPENDENCIES, detect_profile_identity, isolation_command, is_transparent, prepare_transparent_environment, supervisor_environment
 from .sandbox import SandboxError, is_strict, strict_command
 from .system_view import (
     SystemViewError,
@@ -190,7 +191,7 @@ def cmd_shell(profile_id: str, command: str | None) -> int:
         if strict:
             child = strict_command(profile, child, env)
         isolated = isolation_command(child)
-        os.execvpe(isolated[0], isolated, env)
+        os.execvpe(isolated[0], isolated, supervisor_environment(env, strict=strict))
         raise AssertionError("os.execvpe returned unexpectedly")
 
     if command is not None:
@@ -287,7 +288,7 @@ def cmd_bridge(profile_id: str, cwd: str | None, command: Sequence[str]) -> int:
             if strict:
                 child = strict_command(profile, child, env)
             isolated = isolation_command(child)
-            os.execvpe(isolated[0], isolated, env)
+            os.execvpe(isolated[0], isolated, supervisor_environment(env, strict=strict))
             raise AssertionError("os.execvpe returned unexpectedly")
         except BaseException:
             if lease is not None:
@@ -306,7 +307,7 @@ def cmd_identity(profile_id: str) -> int:
         raise ProfileError(
             f"profile {profile_id!r} is not configured for transparent networking"
         )
-    identity = detect_exit_identity(profile.get("network", {}))
+    identity = detect_profile_identity(profile)
     print(json.dumps(identity, ensure_ascii=False, indent=2))
     return 0
 
@@ -324,6 +325,8 @@ def profile_dependencies(profile: Mapping[str, Any]) -> list[str]:
     required: list[str] = []
     if is_transparent(profile):
         required.extend(TRANSPARENT_DEPENDENCIES)
+        if profile.get("network", {}).get("flclash_node"):
+            required.append("python-yaml")
     if is_strict(profile):
         required.append("bwrap")
     return required
@@ -344,7 +347,10 @@ def cmd_doctor() -> int:
             shell = resolved_shell(profile)
             cwd = resolved_cwd(profile)
             terminal_command(profile, ["true"])
-            missing = [name for name in profile_dependencies(profile) if not shutil.which(name)]
+            missing = [
+                name for name in profile_dependencies(profile)
+                if not (importlib.util.find_spec("yaml") if name == "python-yaml" else shutil.which(name))
+            ]
             if missing:
                 raise ProfileError("missing dependencies: " + ", ".join(missing))
             if is_strict(profile) and system_view_mode(profile) == "private":

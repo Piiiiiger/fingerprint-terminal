@@ -76,11 +76,13 @@ result; the host Obsidian installation is unaffected.
 ```bash
 cd ~/code/fingerprint-terminal
 ./bin/fingerprint-terminal prepare-system strict-auto-ip
+./bin/fingerprint-terminal prepare-system strict-node-example
 ./bin/fingerprint-terminal doctor
 ./bin/fingerprint-terminal list
 ./bin/fingerprint-terminal launch local
 ./bin/fingerprint-terminal identity strict-auto-ip
 ./bin/fingerprint-terminal launch strict-auto-ip
+./bin/fingerprint-terminal launch strict-node-example
 ```
 
 After `./install.sh`, the same commands can be run from anywhere without the
@@ -122,6 +124,19 @@ versions remain observable, and individual programs can reveal their own build
 details. The runtime timezone and locale continue to follow the verified proxy
 exit rather than a fixed location; when the exit is Singapore, the shell uses
 `Asia/Singapore` and `en_SG.UTF-8`.
+
+`strict-node-example` uses the same strict sandbox with its own HOME and private
+`/usr`. Its host-side helper reads the named `example-node` node and its dialer
+chain from FlClash's active configuration, then exposes a dedicated local proxy
+on `127.0.0.1:7900`. This requires `python-yaml` on the host and currently
+supports TCP VLESS/TLS nodes. The selected node's credentials are kept in a
+mode-0600 file under the profile's host-side state directory, outside the
+sandbox. Other FlClash selectors are not changed. At each launch, preflight
+observes the exit IP and requires country `SG` and timezone `Asia/Singapore`
+before starting the shell. The shell then uses `en_SG.UTF-8`; the private
+system view is built with that locale. If the node or exit changes to an
+incompatible location, startup fails rather than presenting mismatched
+identity fields. Existing terminal sessions retain their startup identity.
 
 For an approved share that contains app-private metadata, set
 `sandbox.hidden_paths` to directory paths relative to that share. Those

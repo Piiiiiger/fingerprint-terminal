@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fingerprint_terminal.identity import identity_environment, locale_for_country, parse_cloudflare_trace
 from fingerprint_terminal.network import (
     _direct_bypass_environment,
     _singbox_config,
+    NetworkError,
+    detect_profile_identity,
     isolation_command,
     is_transparent,
+    supervisor_environment,
 )
 from fingerprint_terminal.profiles import ProfileError, build_environment, validate_profile
 
@@ -54,6 +58,31 @@ class NetworkTests(unittest.TestCase):
     def test_locale_mapping(self) -> None:
         self.assertEqual(locale_for_country("US"), "en_US.UTF-8")
         self.assertEqual(locale_for_country("JP"), "ja_JP.UTF-8")
+        self.assertEqual(locale_for_country("SG"), "en_SG.UTF-8")
+
+    def test_named_node_rejects_wrong_exit_country_or_timezone(self) -> None:
+        profile = self.transparent_profile()
+        profile["network"].update(
+            flclash_node="example-node",
+            expected_country="SG",
+            expected_timezone="Asia/Singapore",
+        )
+        with patch("fingerprint_terminal.network.ensure_node_proxy") as ensure, \
+             patch("fingerprint_terminal.network.detect_exit_identity") as detect:
+            detect.return_value = {"country_code": "US", "timezone": "America/Los_Angeles"}
+            with self.assertRaisesRegex(NetworkError, "expected SG"):
+                detect_profile_identity(profile)
+            ensure.assert_called_once_with(profile)
+            detect.return_value = {"country_code": "SG", "timezone": "Asia/Hong_Kong"}
+            with self.assertRaisesRegex(NetworkError, "expected Asia/Singapore"):
+                detect_profile_identity(profile)
+
+    def test_host_supervisor_uses_installed_locale_for_strict_guest(self) -> None:
+        env = {"LANG": "en_SG.UTF-8", "LC_ALL": "en_SG.UTF-8", "LANGUAGE": "en_SG"}
+        host = supervisor_environment(env, strict=True)
+        self.assertEqual((host["LANG"], host["LC_ALL"]), ("C.UTF-8", "C.UTF-8"))
+        self.assertNotIn("LANGUAGE", host)
+        self.assertEqual(supervisor_environment(env, strict=False), env)
 
     def test_transparent_profile_strips_host_proxy_environment(self) -> None:
         profile = self.transparent_profile()

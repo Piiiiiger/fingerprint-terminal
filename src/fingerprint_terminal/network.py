@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .identity import IdentityError, detect_exit_identity, identity_environment
+from .flclash_node import FlClashNodeError, ensure_node_proxy
 
 
 STATE_ROOT = Path.home() / ".local" / "state" / "fingerprint-terminal"
@@ -156,6 +157,29 @@ def _singbox_config(network: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def detect_profile_identity(profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Observe and validate the exit selected for this profile."""
+
+    network = settings(profile)
+    try:
+        if network.get("flclash_node"):
+            ensure_node_proxy(profile)
+        identity = detect_exit_identity(network)
+    except (IdentityError, FlClashNodeError) as exc:
+        raise NetworkError(str(exc)) from exc
+    expected_country = str(network.get("expected_country") or "").upper()
+    if expected_country and identity.get("country_code") != expected_country:
+        raise NetworkError(
+            f"proxy exit country is {identity.get('country_code') or 'unknown'}, expected {expected_country}"
+        )
+    expected_timezone = str(network.get("expected_timezone") or "")
+    if expected_timezone and identity.get("timezone") != expected_timezone:
+        raise NetworkError(
+            f"proxy exit timezone is {identity.get('timezone') or 'unknown'}, expected {expected_timezone}"
+        )
+    return identity
+
+
 def prepare_transparent_environment(
     profile: Mapping[str, Any], env: Mapping[str, str]
 ) -> tuple[dict[str, str], dict[str, Any]]:
@@ -180,10 +204,7 @@ def prepare_transparent_environment(
     if not SUPERVISOR.is_file():
         raise NetworkError(f"network supervisor is missing: {SUPERVISOR}")
 
-    try:
-        identity = detect_exit_identity(network)
-    except IdentityError as exc:
-        raise NetworkError(str(exc)) from exc
+    identity = detect_profile_identity(profile)
 
     result = dict(env)
     for key in _PROXY_ENV_KEYS:
@@ -268,3 +289,13 @@ def isolation_command(child: Sequence[str]) -> list[str]:
         *[str(part) for part in child],
     ]
 
+
+def supervisor_environment(env: Mapping[str, str], *, strict: bool) -> dict[str, str]:
+    """Keep host-side setup on an installed locale; bwrap sets the guest locale."""
+
+    result = dict(env)
+    if strict:
+        result["LANG"] = "C.UTF-8"
+        result["LC_ALL"] = "C.UTF-8"
+        result.pop("LANGUAGE", None)
+    return result

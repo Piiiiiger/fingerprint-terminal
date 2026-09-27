@@ -179,6 +179,23 @@ def validate_profile(profile: Any) -> None:
             raise ProfileError(
                 f"profile {profile_id!r}: network.proxy_port out of range"
             )
+        node_name = network.get("flclash_node")
+        if node_name is not None and (not isinstance(node_name, str) or not node_name.strip()):
+            raise ProfileError(f"profile {profile_id!r}: network.flclash_node must name a node")
+        expected_country = network.get("expected_country")
+        if expected_country is not None and (
+            not isinstance(expected_country, str)
+            or not re.fullmatch(r"[A-Z]{2}", expected_country)
+        ):
+            raise ProfileError(f"profile {profile_id!r}: network.expected_country must be a two-letter code")
+        expected_timezone = network.get("expected_timezone")
+        if expected_timezone is not None and (
+            not isinstance(expected_timezone, str)
+            or not expected_timezone
+            or expected_timezone.startswith("/")
+            or ".." in PurePosixPath(expected_timezone).parts
+        ):
+            raise ProfileError(f"profile {profile_id!r}: network.expected_timezone is invalid")
         if network.get("proxy_protocol", "mixed") not in {"mixed", "http", "socks5"}:
             raise ProfileError(
                 f"profile {profile_id!r}: network.proxy_protocol must be mixed, http, or socks5"

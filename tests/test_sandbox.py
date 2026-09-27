@@ -109,6 +109,7 @@ class SandboxTests(unittest.TestCase):
             for relative in (
                 "usr/bin/bash", "usr/bin/python3", "usr/bin/wl-paste",
                 "usr/share/zoneinfo/America/Los_Angeles",
+                "usr/share/zoneinfo/Asia/Singapore",
                 "usr/share/wayland-sessions/niri.desktop", "ready.json",
                 "etc/nsswitch.conf", "etc/ssl/cert.pem",
             ):
@@ -145,6 +146,7 @@ class SandboxTests(unittest.TestCase):
             for relative in (
                 "usr/bin/bash", "usr/bin/python3", "usr/bin/wl-paste",
                 "usr/share/zoneinfo/America/Los_Angeles",
+                "usr/share/zoneinfo/Asia/Singapore",
                 "usr/share/wayland-sessions/niri.desktop", "ready.json",
             ):
                 path = release / relative

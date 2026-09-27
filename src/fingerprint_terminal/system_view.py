@@ -60,6 +60,7 @@ def system_root(profile: Mapping[str, Any]) -> Path:
         "usr/bin/python3",
         "usr/bin/wl-paste",
         "usr/share/zoneinfo/America/Los_Angeles",
+        "usr/share/zoneinfo/Asia/Singapore",
         "usr/share/wayland-sessions/niri.desktop",
     ):
         if not (root / relative).is_file():
@@ -138,12 +139,13 @@ def prepare_system_view(profile: Mapping[str, Any], *, refresh: bool = False) ->
         try:
             subprocess.run(command, check=True)
             # The package hooks may skip locale generation in a minimal root.
-            subprocess.run(
-                ["unshare", "--user", "--map-root-user", "--mount",
-                 "--propagation", "private", "--", "chroot", str(stage),
-                 "/usr/bin/localedef", "-i", "en_US", "-f", "UTF-8", "en_US.UTF-8"],
-                check=True,
-            )
+            for locale in ("en_US", "en_SG"):
+                subprocess.run(
+                    ["unshare", "--user", "--map-root-user", "--mount",
+                     "--propagation", "private", "--", "chroot", str(stage),
+                     "/usr/bin/localedef", "-i", locale, "-f", "UTF-8", f"{locale}.UTF-8"],
+                    check=True,
+                )
         except (OSError, subprocess.CalledProcessError) as exc:
             raise SystemViewError(f"could not prepare private /usr: {exc}") from exc
 
@@ -163,7 +165,8 @@ def prepare_system_view(profile: Mapping[str, Any], *, refresh: bool = False) ->
         )
         for relative in ("bin/bash", "bin/python3", "bin/ssh", "bin/cloudflared",
                          "bin/wl-paste",
-                         "share/zoneinfo/America/Los_Angeles"):
+                         "share/zoneinfo/America/Los_Angeles",
+                         "share/zoneinfo/Asia/Singapore"):
             if not (usr / relative).is_file():
                 raise SystemViewError(f"private /usr package is missing: {relative}")
         (stage / "ready.json").write_text(
