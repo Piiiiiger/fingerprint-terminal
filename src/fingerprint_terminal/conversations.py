@@ -19,6 +19,7 @@ from .profiles import PROFILE_DATA_ROOT
 
 RETENTION_DAYS = 14
 DEFAULT_CATEGORIES = ("未分类", "工作", "学习", "开发", "临时", "保留")
+_PROC_ROOT = Path("/proc")
 
 
 class ConversationError(RuntimeError):
@@ -318,27 +319,12 @@ def _process_belongs_to_profile(pid: int, profile_id: str) -> bool:
 
     marker = f"fingerprint-terminal/profiles/{profile_id}/home"
     try:
-        mountinfo = Path(f"/proc/{pid}/mountinfo").read_text(
+        mountinfo = (_PROC_ROOT / str(pid) / "mountinfo").read_text(
             encoding="utf-8", errors="replace"
         )
     except OSError:
         return False
     return marker in mountinfo
-
-
-def _claude_process_uses_session(arguments: list[str], session_id: str) -> bool:
-    """Treat an unidentified Claude process as busy, but allow other sessions."""
-
-    for index, argument in enumerate(arguments):
-        for option in ("--resume", "--session-id"):
-            if argument == option:
-                if index + 1 >= len(arguments) or arguments[index + 1].startswith("-"):
-                    return True
-                return arguments[index + 1] == session_id
-            if argument.startswith(option + "="):
-                value = argument.partition("=")[2]
-                return not value or value == session_id
-    return True
 
 
 def _claude_session_id(arguments: list[str]) -> str | None:
@@ -355,32 +341,67 @@ def _claude_session_id(arguments: list[str]) -> str | None:
     return None
 
 
+def _live_process(entry: Path) -> bool:
+    try:
+        return entry.joinpath("stat").read_text().rsplit(") ", 1)[1].split()[0] not in {"Z", "X"}
+    except (OSError, IndexError):
+        return False
+
+
+def _process_claude_session_id(entry: Path, profile_id: str, arguments: list[str]) -> str | None:
+    """Resolve a live registry entry using namespace PID and process start time.
+
+    A registry file alone is insufficient: stale files survive exits and PID
+    numbers are reused across strict sessions' private PID namespaces.
+    """
+
+    try:
+        status = entry.joinpath("status").read_text()
+        namespace_pid = next(line for line in status.splitlines() if line.startswith("NSpid:")).split()[-1]
+        namespace = str(entry.joinpath("ns/pid").readlink())
+        start = entry.joinpath("stat").read_text().rsplit(") ", 1)[1].split()[19]
+        path = PROFILE_DATA_ROOT / profile_id / "home/.claude/sessions" / f"{namespace_pid}.json"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            isinstance(record, dict)
+            and str(record.get("pid")) == namespace_pid
+            and str(record.get("procStart")) == start
+            and str(record.get("pidDomain", "")).endswith(":" + namespace)
+            and isinstance(record.get("sessionId"), str)
+            and record["sessionId"]
+        ):
+            return record["sessionId"]
+    except (OSError, ValueError, IndexError, StopIteration):
+        pass
+    return _claude_session_id(arguments)
+
+
 def _claude_pid_matches(pid: int, profile_id: str, session_id: str) -> bool:
-    entry = Path(f"/proc/{pid}")
+    entry = _PROC_ROOT / str(pid)
     try:
         raw = (entry / "cmdline").read_bytes().split(b"\0")
-        if not raw or Path(raw[0].decode("utf-8", errors="ignore")).name != "claude":
+        if not raw or Path(raw[0].decode("utf-8", errors="ignore")).name != "claude" or not _live_process(entry):
             return False
         arguments = [part.decode("utf-8", errors="replace") for part in raw[1:] if part]
-        return _claude_session_id(arguments) == session_id and _process_belongs_to_profile(pid, profile_id)
+        return _process_claude_session_id(entry, profile_id, arguments) == session_id and _process_belongs_to_profile(pid, profile_id)
     except (OSError, UnicodeError):
         return False
 
 
 def active_claude_sessions(profile_id: str = "strict-auto-ip") -> dict[str, list[int]]:
-    """Map explicitly named Claude sessions to processes in this profile."""
+    """Map verified registered or explicitly named sessions to live processes."""
 
     result: dict[str, list[int]] = {}
-    for entry in Path("/proc").iterdir():
+    for entry in _PROC_ROOT.iterdir():
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
         try:
             raw = (entry / "cmdline").read_bytes().split(b"\0")
-            if not raw or Path(raw[0].decode("utf-8", errors="ignore")).name != "claude":
+            if not raw or Path(raw[0].decode("utf-8", errors="ignore")).name != "claude" or not _live_process(entry):
                 continue
             arguments = [part.decode("utf-8", errors="replace") for part in raw[1:] if part]
-            session_id = _claude_session_id(arguments)
+            session_id = _process_claude_session_id(entry, profile_id, arguments)
             if session_id and _process_belongs_to_profile(pid, profile_id):
                 result.setdefault(session_id, []).append(pid)
         except (OSError, UnicodeError):
@@ -389,7 +410,7 @@ def active_claude_sessions(profile_id: str = "strict-auto-ip") -> dict[str, list
 
 
 def terminate_claude_session(profile_id: str, session_id: str) -> int:
-    """Request a named Claude session to exit, using pidfds to avoid PID reuse."""
+    """Request a verified Claude session to exit, using pidfds to avoid PID reuse."""
 
     pids = active_claude_sessions(profile_id).get(session_id, [])
     if not pids:
@@ -420,12 +441,13 @@ def terminate_claude_session(profile_id: str, session_id: str) -> int:
 
 
 def provider_is_running(
-    provider: str, profile_id: str = "strict-auto-ip", session_id: str | None = None
+    provider: str, profile_id: str = "strict-auto-ip", session_id: str | None = None,
+    cwd: str | None = None,
 ) -> bool:
     expected = {"claude": "claude", "codex": "codex"}.get(provider)
     if expected is None:
         return False
-    proc = Path("/proc")
+    proc = _PROC_ROOT
     if not proc.is_dir():
         return False
     for entry in proc.iterdir():
@@ -437,16 +459,34 @@ def provider_is_running(
             command_matches = bool(raw and Path(raw[0].decode("utf-8", errors="ignore")).name == expected)
             if not (comm_matches or command_matches):
                 continue
+            if not _live_process(entry):
+                continue
             if not _process_belongs_to_profile(int(entry.name), profile_id):
                 continue
             if provider == "claude" and session_id is not None:
                 arguments = [part.decode("utf-8", errors="replace") for part in raw[1:] if part]
-                if not _claude_process_uses_session(arguments, session_id):
+                actual_session = _process_claude_session_id(entry, profile_id, arguments)
+                if actual_session is not None and actual_session != session_id:
                     continue
+                if actual_session is None and cwd:
+                    process_cwd = str(entry.joinpath("cwd").readlink())
+                    if process_cwd.rstrip("/") != cwd.rstrip("/"):
+                        continue
             return True
         except (OSError, UnicodeError):
             continue
     return False
+
+
+def _require_idle(provider: str, profile_id: str, session_id: str, cwd: str, action: str) -> None:
+    if not provider_is_running(provider, profile_id, session_id, cwd=cwd):
+        return
+    if provider == "claude" and session_id not in active_claude_sessions(profile_id):
+        raise ConversationError(
+            f"此目录仍有无法确认会话的 Claude Code 进程（{cwd or '未知目录'}），请先退出后再{action}"
+        )
+    label = "Claude Code" if provider == "claude" else "Codex"
+    raise ConversationError(f"请先退出正在运行的 {label}，再{action}")
 
 
 class ConversationManager:
@@ -556,9 +596,7 @@ class ConversationManager:
             raise ConversationError("标题不能超过 200 个字符")
 
         conversation = self._active_by_key(key)
-        if provider_is_running(conversation.provider, self.profile_id, conversation.session_id):
-            label = "Claude Code" if conversation.provider == "claude" else "Codex"
-            raise ConversationError(f"请先退出正在运行的 {label}，再修改标题")
+        _require_idle(conversation.provider, self.profile_id, conversation.session_id, conversation.cwd, "修改标题")
 
         if conversation.provider == "claude":
             self._rename_claude(conversation, new_title)
@@ -856,9 +894,7 @@ class ConversationManager:
 
     def move_to_trash(self, key: str) -> TrashEntry:
         conversation = self._active_by_key(key)
-        if provider_is_running(conversation.provider, self.profile_id, conversation.session_id):
-            label = "Claude Code" if conversation.provider == "claude" else "Codex"
-            raise ConversationError(f"请先退出正在运行的 {label}，再移动其会话")
+        _require_idle(conversation.provider, self.profile_id, conversation.session_id, conversation.cwd, "移动其会话")
         destination = self.trash_root / conversation.provider / conversation.session_id
         if destination.exists():
             raise ConversationError("该会话已经在回收站中")
@@ -940,9 +976,7 @@ class ConversationManager:
         entry = next((item for item in self.trash_entries() if item.key == key), None)
         if entry is None:
             raise ConversationError("回收站中找不到该会话")
-        if provider_is_running(entry.provider, self.profile_id, entry.session_id):
-            label = "Claude Code" if entry.provider == "claude" else "Codex"
-            raise ConversationError(f"请先退出正在运行的 {label}，再恢复其会话")
+        _require_idle(entry.provider, self.profile_id, entry.session_id, entry.cwd, "恢复其会话")
         directory = Path(entry.entry_dir)
         try:
             manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))

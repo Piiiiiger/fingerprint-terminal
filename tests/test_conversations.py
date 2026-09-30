@@ -10,8 +10,9 @@ from unittest.mock import patch
 
 from fingerprint_terminal.conversations import (
     ConversationManager,
-    _claude_process_uses_session,
     _claude_session_id,
+    active_claude_sessions,
+    provider_is_running,
     terminate_claude_session,
 )
 
@@ -20,15 +21,98 @@ CLAUDE_ID = "11111111-1111-4111-8111-111111111111"
 CODEX_ID = "22222222-2222-4222-8222-222222222222"
 
 
-class ClaudeProcessTests(unittest.TestCase):
-    def test_resume_only_blocks_its_own_session(self) -> None:
-        self.assertTrue(_claude_process_uses_session([f"--resume={CLAUDE_ID}"], CLAUDE_ID))
-        self.assertFalse(_claude_process_uses_session([f"--resume={CLAUDE_ID}"], CODEX_ID))
-        self.assertFalse(_claude_process_uses_session(["--resume", CLAUDE_ID], CODEX_ID))
-        self.assertTrue(_claude_process_uses_session(["--continue"], CODEX_ID))
-        self.assertTrue(_claude_process_uses_session(["--resume"], CODEX_ID))
-        self.assertTrue(_claude_process_uses_session(["--resume="], CODEX_ID))
+class ClaudeRegistryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.proc = self.root / "proc"
+        self.entry = self.proc / "123"
+        (self.entry / "ns").mkdir(parents=True)
+        (self.entry / "comm").write_text("claude\n")
+        (self.entry / "cmdline").write_bytes(b"claude\0")
+        (self.entry / "stat").write_text("123 (claude) " + " ".join(["S"] + ["0"] * 18 + ["1234"]))
+        (self.entry / "status").write_text("NSpid:\t123\t7\n")
+        (self.entry / "ns/pid").symlink_to("pid:[456]")
+        (self.entry / "cwd").symlink_to("/home/test/project")
+        (self.entry / "mountinfo").write_text("fingerprint-terminal/profiles/strict-auto-ip/home")
+        self.registry = self.root / "profiles/strict-auto-ip/home/.claude/sessions/7.json"
+        self.registry.parent.mkdir(parents=True)
+        for name, value in (("_PROC_ROOT", self.proc), ("PROFILE_DATA_ROOT", self.root / "profiles")):
+            mock = patch("fingerprint_terminal.conversations." + name, value)
+            mock.start()
+            self.addCleanup(mock.stop)
 
+    def register(self, **changes) -> None:
+        record = {"pid": 7, "sessionId": CLAUDE_ID, "procStart": "1234", "pidDomain": "linux:boot:pid:[456]"}
+        record.update(changes)
+        self.registry.write_text(json.dumps(record))
+
+    def test_registered_plain_claude_only_blocks_its_own_session(self) -> None:
+        self.register()
+        self.assertTrue(provider_is_running("claude", session_id=CLAUDE_ID, cwd="/home/test/project"))
+        self.assertFalse(provider_is_running("claude", session_id=CODEX_ID, cwd="/home/test/project"))
+        self.assertEqual(active_claude_sessions(), {CLAUDE_ID: [123]})
+
+    def test_unidentified_process_in_other_directory_does_not_block(self) -> None:
+        self.assertFalse(provider_is_running("claude", session_id=CLAUDE_ID, cwd="/home/test/other"))
+        self.assertTrue(provider_is_running("claude", session_id=CLAUDE_ID, cwd="/home/test/project"))
+
+    def test_explicit_resume_only_blocks_its_own_session(self) -> None:
+        (self.entry / "cmdline").write_bytes(f"claude\0--resume\0{CLAUDE_ID}\0".encode())
+        self.assertTrue(provider_is_running("claude", session_id=CLAUDE_ID, cwd="/home/test/project"))
+        self.assertFalse(provider_is_running("claude", session_id=CODEX_ID, cwd="/home/test/project"))
+
+    def test_verified_registry_tracks_session_changed_after_resume(self) -> None:
+        (self.entry / "cmdline").write_bytes(f"claude\0--resume={CODEX_ID}\0".encode())
+        self.register()
+        self.assertTrue(provider_is_running("claude", session_id=CLAUDE_ID, cwd="/home/test/project"))
+        self.assertFalse(provider_is_running("claude", session_id=CODEX_ID, cwd="/home/test/project"))
+
+    def make_conversation(self, cwd: str) -> ConversationManager:
+        project = self.root / "profiles/strict-auto-ip/home/.claude/projects/test"
+        project.mkdir(parents=True)
+        (project / f"{CLAUDE_ID}.jsonl").write_text(json.dumps({
+            "sessionId": CLAUDE_ID, "cwd": cwd, "type": "user", "timestamp": "2026-09-30T06:36:00Z",
+        }) + "\n")
+        return ConversationManager(profile_data_root=self.root / "profiles")
+
+    def test_inactive_conversation_can_be_trashed_while_other_directory_is_busy(self) -> None:
+        manager = self.make_conversation("/home/test/other")
+        manager.move_to_trash(f"claude:{CLAUDE_ID}")
+        self.assertEqual(manager.discover(), [])
+        self.assertEqual(len(manager.trash_entries()), 1)
+
+    def test_unknown_same_directory_process_has_specific_message(self) -> None:
+        manager = self.make_conversation("/home/test/project")
+        with self.assertRaisesRegex(Exception, "无法确认会话"):
+            manager.move_to_trash(f"claude:{CLAUDE_ID}")
+        self.assertEqual(len(manager.discover()), 1)
+
+    def test_known_active_conversation_is_protected(self) -> None:
+        self.register()
+        manager = self.make_conversation("/home/test/project")
+        with self.assertRaisesRegex(Exception, "请先退出正在运行"):
+            manager.move_to_trash(f"claude:{CLAUDE_ID}")
+        self.assertEqual(len(manager.discover()), 1)
+
+    def test_stale_registry_cannot_identify_or_stop_reused_pid(self) -> None:
+        for changes in ({"procStart": "9999"}, {"pidDomain": "linux:boot:pid:[999]"}, {"pid": 8}):
+            with self.subTest(changes=changes):
+                self.register(**changes)
+                self.assertEqual(active_claude_sessions(), {})
+                self.assertFalse(provider_is_running("claude", session_id=CLAUDE_ID, cwd="/home/test/other"))
+
+    def test_exited_process_and_leftover_registry_do_not_block(self) -> None:
+        self.register()
+        (self.entry / "stat").write_text("123 (claude) " + " ".join(["Z"] + ["0"] * 18 + ["1234"]))
+        self.assertFalse(provider_is_running("claude", session_id=CLAUDE_ID, cwd="/home/test/project"))
+        self.assertEqual(active_claude_sessions(), {})
+        (self.entry / "comm").unlink()
+        self.assertFalse(provider_is_running("claude", session_id=CLAUDE_ID, cwd="/home/test/project"))
+
+
+class ClaudeProcessTests(unittest.TestCase):
     def test_only_explicit_session_ids_can_be_stopped(self) -> None:
         self.assertEqual(_claude_session_id([f"--resume={CLAUDE_ID}"]), CLAUDE_ID)
         self.assertEqual(_claude_session_id(["--session-id", CLAUDE_ID]), CLAUDE_ID)

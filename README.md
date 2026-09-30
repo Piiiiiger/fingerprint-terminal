@@ -29,6 +29,11 @@ Fingerprint Terminal can manage local Claude Code and Codex conversation histori
 
 Moving a conversation to the Fingerprint Terminal trash removes the provider's resumable conversation artifact and its related local indexes. Claude Code project history/sidecars and Codex session indexes/thread rows are handled separately; authentication, settings, plugins, and Codex memories are not modified. Trashed conversations therefore stop appearing to the corresponding CLI while remaining recoverable for 14 days.
 
+Claude activity checks use live processes and verified session registrations,
+so leftover registration files after an exit do not block conversation changes.
+When an older Claude process cannot be associated with a session, it blocks
+changes only in its working directory and the message explains that uncertainty.
+
 Trash is permanently purged after 14 days by a daily user-systemd timer when available. Expiration is also enforced when `strict-auto-ip` is launched and whenever the conversation manager is opened. Maintenance commands:
 
 ```bash
