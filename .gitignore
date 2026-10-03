@@ -13,3 +13,13 @@ build/
 *.pem
 *.key
 config/profiles.local.json
+
+# Local history, runtime state and audit backups
+*.bundle
+*.log
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.bak
+.DS_Store

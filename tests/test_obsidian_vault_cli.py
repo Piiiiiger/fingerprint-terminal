@@ -4,6 +4,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "host/obsidian-vault-cli.py"
@@ -20,7 +21,7 @@ class ObsidianVaultCliTests(unittest.TestCase):
             source = root / "未命名.base"
             source.write_text("views:\n", encoding="utf-8")
             self.assertEqual(
-                MODULE.run(["vault=vault", "delete", "path=未命名.base"], root),
+                MODULE.run([f"vault={root.name}", "delete", "path=未命名.base"], root),
                 0,
             )
             self.assertFalse(source.exists())
@@ -31,6 +32,23 @@ class ObsidianVaultCliTests(unittest.TestCase):
             root = Path(tmp)
             self.assertEqual(MODULE.run(["delete", "path=../outside"], root), 2)
             self.assertEqual(MODULE.run(["files"], root), 2)
+
+    def test_discovers_vault_from_nested_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".obsidian").mkdir()
+            nested = root / "notes" / "project"
+            nested.mkdir(parents=True)
+            with mock.patch.object(MODULE.Path, "cwd", return_value=nested):
+                self.assertEqual(MODULE.vault_root(), root.resolve())
+
+    def test_rejects_another_vault_without_moving_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "note.md"
+            source.write_text("keep", encoding="utf-8")
+            self.assertEqual(MODULE.run(["vault=another-vault", "delete", "path=note.md"], root), 2)
+            self.assertEqual(source.read_text(), "keep")
 
 
 if __name__ == "__main__":

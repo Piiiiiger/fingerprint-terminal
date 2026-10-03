@@ -75,8 +75,10 @@ refreshed.
 
 For the existing `strict-auto-ip` home, `install.sh` also installs a small
 profile-local `obsidian` command. It supports only
-`obsidian vault=vault delete path=<relative-file>`, moving a file into the vault's `.trash` without
-launching the desktop app. Other Obsidian commands return an unsupported
+`obsidian [vault=<directory-name>] delete path=<relative-file>`, moving a file into the vault's `.trash` without
+launching the desktop app. The vault is discovered from the current directory
+or its parents using `.obsidian`; an explicit vault name must match that directory.
+Other Obsidian commands return an unsupported
 result; the host Obsidian installation is unaffected.
 
 ## Quick start
@@ -276,3 +278,15 @@ python3 -m compileall -q src
 ```
 
 The project uses only the Python standard library for CLI/runtime code and tests. The optional manager uses the same GTK4/libadwaita stack already present on this host and in the sibling fingerprint desktop projects.
+
+## Repository privacy
+
+Keep real proxy credentials, node names, shared host paths and personal profile
+settings outside the checkout. Use `FT_PROFILES_FILE` to select a local configuration;
+the committed `config/profiles.json` contains generic defaults only. Existing user
+configurations are preserved when the example defaults change.
+
+Before publishing a fork, review tracked files and Git history, including commit
+authors and email addresses. Ignoring or deleting a file does not remove earlier
+committed copies. Use a private commit email, and keep history backups outside the
+repository.

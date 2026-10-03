@@ -9,20 +9,21 @@ from pathlib import Path, PurePosixPath
 
 
 def vault_root() -> Path:
-    for candidate in (Path.cwd(), Path.home() / "code/vault", Path.home() / "vault"):
-        if (candidate / "AGENTS.md").is_file() and (candidate / ".obsidian").is_dir():
-            return candidate.resolve()
-    raise ValueError("Vault 'vault' is not available from the current directory.")
+    current = Path.cwd().resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".obsidian").is_dir():
+            return candidate
+    raise ValueError("No Obsidian vault is available from the current directory.")
 
 
 def run(argv: list[str], root: Path) -> int:
     commands = [arg for arg in argv if "=" not in arg]
     options = dict(arg.split("=", 1) for arg in argv if "=" in arg)
     if len(commands) != 1 or commands[0] != "delete" or set(options) - {"vault", "path"}:
-        print("Supported vault command: obsidian vault=vault delete path=<relative-file>", file=sys.stderr)
+        print("Supported vault command: obsidian [vault=<directory-name>] delete path=<relative-file>", file=sys.stderr)
         return 2
-    if options.get("vault", "vault") != "vault":
-        print("Only vault 'vault' is available.", file=sys.stderr)
+    if options.get("vault", root.resolve().name) != root.resolve().name:
+        print("The requested vault does not match the current vault directory.", file=sys.stderr)
         return 2
 
     raw_path = options.get("path", "")
