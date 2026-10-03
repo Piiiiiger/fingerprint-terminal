@@ -91,13 +91,7 @@
         "dmi_profile": "thinkbook-14-g7-iml",
         "username": "dev",
         "clipboard": "wayland",
-        "shares": [
-          {
-            "source": "~/code",
-            "target": "code",
-            "mode": "rw"
-          }
-        ]
+        "shares": []
       }
     }
   ]

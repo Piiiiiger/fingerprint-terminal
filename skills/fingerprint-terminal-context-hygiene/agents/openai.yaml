@@ -1,0 +1,3 @@
+interface:
+  display_name: "Fingerprint Terminal Context Hygiene"
+  short_description: "Audit isolated Claude context and maintain memories"

@@ -236,6 +236,7 @@ def cmd_bridge(profile_id: str, cwd: str | None, command: Sequence[str]) -> int:
         # keeps /home/<user>/... paths identical on both sides of the bridge.
         if strict:
             host_home = Path.home().resolve()
+            covered = host_cwd == host_home
             shares = list(profile.get("sandbox", {}).get("shares", []) or [])
             for share in shares:
                 source = Path(
@@ -243,9 +244,13 @@ def cmd_bridge(profile_id: str, cwd: str | None, command: Sequence[str]) -> int:
                 ).expanduser().resolve()
                 try:
                     host_cwd.relative_to(source)
-                    source_relative = source.relative_to(host_home)
                 except ValueError:
                     continue
+                covered = True
+                try:
+                    source_relative = source.relative_to(host_home)
+                except ValueError:
+                    break
                 if source_relative.parts:
                     compatibility_target = source_relative.as_posix()
                     # If the configured share already preserves the host-home
@@ -265,6 +270,11 @@ def cmd_bridge(profile_id: str, cwd: str | None, command: Sequence[str]) -> int:
                     profile["sandbox"] = sandbox
                     ephemeral_targets.add(compatibility_target)
                 break
+            if not covered:
+                raise ProfileError(
+                    f"bridge cwd is not covered by sandbox.shares: {host_cwd}; "
+                    "add the directory explicitly in the settings window or profile config"
+                )
         profile.setdefault("terminal", {})["cwd"] = str(host_cwd)
 
     env = build_environment(profile)

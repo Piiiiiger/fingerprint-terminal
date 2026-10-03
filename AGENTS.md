@@ -9,7 +9,7 @@
 - Default profiles must preserve the user's real `HOME`, shell configuration, SSH config, Git config, and other normal terminal capabilities.
 - Stronger isolation remains opt-in and must state exactly what it isolates. The `local` profile is intentionally unchanged.
 - `sandbox.mode=strict` must use an isolated HOME, private runtime/process/filesystem views, and explicit `sandbox.shares`; never expose the host HOME implicitly.
+- Fresh strict configurations must start with empty `sandbox.shares`. Preserve existing user shares; startup and bridge commands must never share new host directories automatically.
 - Strict mode is not a VM: kernel version, CPU capabilities, timing characteristics, and other syscall-level hardware/kernel facts may still be observable.
 - Keep the project usable without installation: `./bin/fingerprint-terminal ...` must work from the repository checkout.
 - Tests must not launch a graphical terminal or modify the real user config.
-

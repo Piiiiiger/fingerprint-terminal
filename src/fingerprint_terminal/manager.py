@@ -307,7 +307,7 @@ class ManagerWindow(Adw.ApplicationWindow):
 
         self.shares_group = Adw.PreferencesGroup(
             title="共享目录",
-            description="只有这里列出的宿主目录会出现在指纹终端里。",
+            description="默认不共享宿主目录；只开放这里列出的目录。",
         )
         share_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         # One stack page per state keeps the button width fixed while it changes.
@@ -356,7 +356,7 @@ class ManagerWindow(Adw.ApplicationWindow):
         self.shares_empty.add_css_class("ft-empty")
         self.shares_empty.append(_label("还没有共享目录", "heading", xalign=0.5))
         self.shares_empty.append(
-            _label("点击右上角的“添加目录”选择一个宿主文件夹。", "caption", "dim-label", xalign=0.5)
+            _label("需要访问宿主文件时，点击右上角的“添加目录”。", "caption", "dim-label", xalign=0.5)
         )
         self.shares_group.add(self.shares_empty)
         page.append(self.shares_group)

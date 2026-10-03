@@ -61,7 +61,10 @@ The installer exposes dedicated Claudian-compatible launchers at:
 ```
 
 They forward the caller's current working directory through an already
-approved strict share.  When that share lives below the host HOME, the bridge
+approved strict share. Configure the vault's directory in `sandbox.shares`
+before using the bridge; an unshared host working directory is rejected. The
+host HOME itself maps to the private HOME without sharing its contents.
+When a configured share lives below the host HOME, the bridge
 also re-binds it at the same relative path inside the private HOME.  This lets
 an Obsidian vault such as `/home/user/code/vault` remain
 `/home/user/code/vault` from the agent's point of view without exposing any
@@ -117,9 +120,10 @@ are copied in rather than bind-mounted, so the sandbox's mount table does not
 name the profile storage for them.  The persistent HOME is still a bind mount,
 so its host-side storage path remains visible in `/proc/self/mountinfo`.
 The host's real home directory is not present: the sandbox home pathname is backed by the
-profile's private HOME.  The default example exposes only the host `~/code`,
-mounted explicitly under the sandbox home (for example `~/code`); add more `sandbox.shares` entries only
-when a host directory is intentionally needed.
+profile's private HOME. The shipped strict profile has `sandbox.shares: []`,
+so a fresh configuration exposes no host working directories. Add a specific
+directory in the settings window or in `sandbox.shares` only when it is needed. Installation
+and startup preserve existing configurations without adding any shares.
 
 The private `/usr` removes the host's package, font, and login-session inventory
 from the strict filesystem view. It is still an Arch userland: package and tool

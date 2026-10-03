@@ -32,6 +32,23 @@ def document() -> dict:
 
 
 class ProfileTests(unittest.TestCase):
+    def test_fresh_config_has_no_shares_and_reload_preserves_user_shares(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "profiles.json"
+            store = load_store(path)
+            self.assertEqual(store.get("strict-auto-ip")["sandbox"]["shares"], [])
+
+            shares = [{"source": temporary, "target": "work", "mode": "ro"}]
+            for profile in store.document["profiles"]:
+                if profile["id"] == "strict-auto-ip":
+                    profile["sandbox"]["shares"] = shares
+            store.save()
+            saved = path.read_bytes()
+
+            reloaded = load_store(path)
+            self.assertEqual(reloaded.get("strict-auto-ip")["sandbox"]["shares"], shares)
+            self.assertEqual(path.read_bytes(), saved)
+
     def test_validate_document_accepts_minimal_profile(self) -> None:
         validate_document(document())
 
@@ -92,4 +109,3 @@ class ProfileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
