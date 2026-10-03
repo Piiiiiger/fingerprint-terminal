@@ -37,6 +37,10 @@ class ProfileTests(unittest.TestCase):
             path = Path(temporary) / "profiles.json"
             store = load_store(path)
             self.assertEqual(store.get("strict-auto-ip")["sandbox"]["shares"], [])
+            network = store.get("strict-auto-ip")["network"]
+            self.assertEqual(network["expected_country"], "SG")
+            self.assertEqual(network["expected_timezone"], "Asia/Singapore")
+            self.assertEqual(store.get("sg-example")["identity"]["timezone"], "Asia/Singapore")
 
             shares = [{"source": temporary, "target": "work", "mode": "ro"}]
             for profile in store.document["profiles"]:

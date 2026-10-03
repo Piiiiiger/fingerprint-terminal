@@ -21,7 +21,8 @@ The default terminal backend is `kitty`. `konsole` is also supported as a fallba
 ChatGPT fingerprint desktop: a private application network namespace, veth,
 `slirp4netns`, nftables TPROXY, and `sing-box`.  The shell receives no proxy
 environment variables, and startup fails if the transparent namespace does
-not reproduce the IP/country observed during preflight.
+not reproduce the IP/country observed during preflight. The shipped strict
+profile also requires a verified Singapore exit (`SG`, `Asia/Singapore`).
 
 ## AI conversation manager
 
@@ -130,9 +131,11 @@ and startup preserve existing configurations without adding any shares.
 The private `/usr` removes the host's package, font, and login-session inventory
 from the strict filesystem view. It is still an Arch userland: package and tool
 versions remain observable, and individual programs can reveal their own build
-details. The runtime timezone and locale continue to follow the verified proxy
-exit rather than a fixed location; when the exit is Singapore, the shell uses
-`Asia/Singapore` and `en_SG.UTF-8`.
+details. The runtime timezone and locale follow the verified proxy exit. The
+shipped strict profile requires Singapore, so its shell uses `Asia/Singapore`
+and `en_SG.UTF-8`; an exit in another country is rejected. Custom profiles can
+set their own `network.expected_country` and `network.expected_timezone`, or
+omit those constraints while retaining the preflight exit lock.
 
 For an approved share that contains app-private metadata, set
 `sandbox.hidden_paths` to directory paths relative to that share. Those

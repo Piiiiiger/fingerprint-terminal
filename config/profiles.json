@@ -80,7 +80,9 @@
         "proxy_protocol": "mixed",
         "auto_identity": true,
         "lock_exit": true,
-        "private_hostname": true
+        "private_hostname": true,
+        "expected_country": "SG",
+        "expected_timezone": "Asia/Singapore"
       },
       "home": {
         "mode": "isolated"
